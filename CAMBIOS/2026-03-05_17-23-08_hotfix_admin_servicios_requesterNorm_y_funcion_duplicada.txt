@@ -1,0 +1,18 @@
+﻿HOTFIX puntual - admin servicios
+
+Problema reportado:
+- admin.js: ReferenceError requesterNorm is not defined al abrir servicios.
+- Al crear servicio nuevo parecia no registrarse.
+
+Causa:
+- Existian dos funciones loadServicesAdmin() en js/admin.js.
+- La segunda (activa por hoisting/sobreescritura) usaba requesterNorm sin declararlo.
+- Al refrescar lista tras guardar, explotaba JS y daba la impresion de no guardar.
+
+Correccion aplicada:
+1) Se declaro requesterNorm en la funcion loadServicesAdmin activa.
+2) Se elimino la definicion duplicada antigua de loadServicesAdmin para evitar inconsistencias futuras.
+
+Validacion:
+- node --check js/admin.js => OK
+- Solo queda una definicion de loadServicesAdmin.

@@ -1,0 +1,181 @@
+FECHA: 2026-03-06 13:21:55
+TIPO: Mejora visual y organizacion del dashboard del paciente
+
+OBJETIVO
+- Reordenar el inicio del paciente para escritorio en una relacion visual aproximada 60/40.
+- Mover la tarjeta informativa de la infografia hacia la parte baja interna.
+- Reducir el ruido visual del panel derecho mostrando solo tarjetas reales:
+  vacaciones solo si estan activas, promociones solo si existen.
+- Mantener una tarjeta util de agenda y una tarjeta de estado de citas.
+- Conservar el comportamiento movil sin romper la disposicion que ya estaba gustando.
+
+ARCHIVOS MODIFICADOS
+- paciente.html
+- css/dashboard.css
+- js/paciente.js
+
+RESUMEN DE CAMBIOS
+
+1) paciente.html
+- Se creo una estructura nueva para el inicio:
+  - `patient-hero-card`
+  - `patientHomeLayout`
+  - `patient-home-media`
+  - `patient-home-sidebar`
+- Esto separa claramente la infografia del bloque de tarjetas y permite controlar escritorio y movil sin mezclar reglas.
+
+FRAGMENTO APLICADO
+```html
+<div id="patientHomeLayout" class="patient-home-layout">
+    <div class="patient-home-media">
+        <div id="patientInfographicWrap" class="patient-infographic-wrap" style="display:none;">
+            <div class="patient-infographic-stage" id="patientInfographicStage"></div>
+            <button type="button" class="patient-infographic-nav prev" id="btnInfPrev" aria-label="Anterior">
+                <i class="fas fa-chevron-left"></i>
+            </button>
+            <button type="button" class="patient-infographic-nav next" id="btnInfNext" aria-label="Siguiente">
+                <i class="fas fa-chevron-right"></i>
+            </button>
+            <div class="patient-infographic-dots" id="patientInfDots"></div>
+        </div>
+    </div>
+
+    <aside class="patient-home-sidebar">
+        <div id="dashboardGrid" class="dashboard-summary-grid">
+            <div class="summary-card card-loading">
+                <div class="summary-icon"><i class="fas fa-spinner fa-spin"></i></div>
+                <div class="summary-title">Cargando informacion...</div>
+            </div>
+        </div>
+    </aside>
+</div>
+```
+
+2) css/dashboard.css
+- Se agrego un bloque nuevo de overrides al final para no desestabilizar reglas anteriores.
+- Escritorio:
+  - layout `patient-home-layout` en dos columnas `3fr / 2fr`
+  - tarjetas del panel derecho en grid adaptativo
+  - altura pensada para que el conjunto se vea dentro del mismo entorno
+- Movil:
+  - vuelve a una sola columna
+  - mantiene la infografia arriba y las tarjetas abajo
+- Infografia:
+  - se agrego un velo suave sobre la imagen
+  - el overlay de texto baja a la parte inferior interna
+  - la caja queda mas ligera visualmente y menos invasiva
+
+FRAGMENTO APLICADO
+```css
+.patient-home-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr);
+    gap: 22px;
+    align-items: stretch;
+    min-height: clamp(460px, 62vh, 660px);
+}
+
+.patient-infographic-overlay {
+    top: auto;
+    left: 24px;
+    right: 24px;
+    bottom: 26px;
+    transform: none;
+    width: auto;
+    max-width: min(78%, 560px);
+    max-height: calc(100% - 88px);
+    overflow-y: auto;
+    padding: 20px 22px;
+    background: linear-gradient(180deg, rgba(18, 16, 27, 0.16), rgba(18, 16, 27, 0.64));
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 18px;
+    backdrop-filter: blur(9px);
+    z-index: 2;
+}
+
+@media (max-width: 900px) {
+    .patient-home-layout {
+        grid-template-columns: 1fr;
+        min-height: auto;
+        gap: 16px;
+    }
+
+    .patient-infographic-overlay {
+        left: 16px;
+        right: 16px;
+        bottom: 52px;
+        max-width: none;
+        max-height: none;
+        padding: 16px 16px 18px;
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(18, 16, 27, 0.12), rgba(18, 16, 27, 0.66));
+    }
+}
+```
+
+3) js/paciente.js
+- `renderInfographicFeed_` ahora expande el dashboard cuando no hay infografias usando la clase `without-infographic`.
+- `checkPromoAndDashboard()` se reorganizo para renderizar tarjetas utiles:
+  - vacaciones solo si hay bloqueo activo
+  - proxima cita o estado de no tener citas
+  - tarjeta fija para abrir agenda
+  - promocion solo si existe
+- Se elimino la tarjeta de relleno `Novedades / Todo al dia`.
+
+FRAGMENTO APLICADO
+```javascript
+if (!feed.length) {
+    clearInfographicAutoplay_();
+    infographicFeedState_.list = [];
+    infographicFeedState_.signature = "";
+    stage.innerHTML = "";
+    dots.innerHTML = "";
+    wrap.style.display = "none";
+    if (layout) layout.classList.add("without-infographic");
+    return;
+}
+```
+
+```javascript
+const cards = [];
+const isVacationActive = isDoctorVacationActive_();
+
+if (isVacationActive) {
+    cards.push(`
+        <article class="summary-card card-vacation">
+            <div class="summary-icon"><i class="fas fa-umbrella-beach"></i></div>
+            <div class="summary-title">${doctorVacationState_.titulo || "Vacaciones del medico"}</div>
+            <div class="summary-value">No se estan tomando nuevas citas.</div>
+            <div class="summary-meta">Hasta: ${doctorVacationState_.fecha_hasta || "--"}</div>
+            <div class="summary-note">${doctorVacationState_.mensaje || doctorVacationState_.block_message || ""}</div>
+        </article>`);
+}
+
+cards.push(`
+    <article class="summary-card card-schedule ${isVacationActive ? "is-disabled" : ""}">
+        <div class="summary-icon"><i class="fas fa-calendar-plus"></i></div>
+        <div class="summary-title">Agendar cita</div>
+        <div class="summary-value">${isVacationActive ? "La agenda esta pausada temporalmente." : "Agenda una nueva cita en segundos."}</div>
+        <div class="summary-note">${isVacationActive
+            ? (doctorVacationState_.block_message || "Tu medico activo un bloqueo temporal por vacaciones.")
+            : "Selecciona servicio, fecha y hora sin salir del dashboard."}</div>
+    </article>`);
+```
+
+VALIDACION
+- Parse de `js/paciente.js` por lectura directa del archivo:
+  - `new Function(fs.readFileSync('js/paciente.js','utf8'))`
+  - Resultado: `OK`
+
+NOTA DE ENTORNO
+- `node --check js/paciente.js` fallo en este entorno por:
+  - `EPERM: operation not permitted, lstat 'c:\\Users\\ADMIN\\Videos'`
+- La validacion se hizo con parse directo del contenido del archivo para evitar ese problema del sandbox.
+
+RESULTADO ESPERADO
+- Movil:
+  - la caja de texto de la infografia queda abajo, dentro de la imagen, ocupando menos visualmente el fondo.
+- Escritorio:
+  - la infografia ocupa el bloque principal
+  - el panel derecho agrupa tarjetas utiles sin tarjetas de relleno
+  - promociones y vacaciones ya no ocupan espacio cuando no aplican

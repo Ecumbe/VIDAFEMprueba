@@ -1,0 +1,40 @@
+﻿FASE 0 + FASE 1 - OPTIMIZACION INICIAL DE LOGIN (APLICADA)
+Fecha: 2026-03-05 15:46:01
+
+Archivos modificados:
+- backend/API.gs.txt
+
+Cambios aplicados (graduales y sin romper flujo):
+1) Bloqueo global en doPost solo para acciones de escritura.
+   - Antes: todas las acciones (incluyendo login y lecturas) esperaban lock global.
+   - Ahora: login y lecturas no esperan lock global; escrituras siguen protegidas.
+   - Impacto esperado: menor espera cuando haya operaciones pesadas en paralelo.
+
+2) Login de admin/paciente evita lectura duplicada de first_login cuando ya viene en fila.
+   - Antes: login exitoso hacia otra lectura completa para first_login.
+   - Ahora: usa first_login del propio registro y solo hace fallback si falta.
+   - Impacto esperado: menos I/O en login exitoso.
+
+3) getSuperadminSheet_ deja de sembrar usuario por defecto automaticamente.
+   - Antes: en cada uso podia forzar semilla por defecto si no existia.
+   - Ahora: la siembra queda solo si se pide explicitamente con ensureSeed=true.
+   - Compatibilidad con tu regla: credencial superadmin se toma de hoja usuarios_superadmin.
+
+Lo que NO se toco:
+- No se cambiaron flujos funcionales de WhatsApp.
+- No se cambiaron flujos funcionales de PDF.
+- No se cambio la UX de cambio de contraseña por perfil.
+- No se alteraron reglas de primer inicio para medico/paciente.
+
+Riesgo controlado:
+- Si hoja usuarios_superadmin estuviera vacia, ya no se crea automaticamente usuario seed.
+- En tu caso es deseado porque ya tienes credenciales reales en esa hoja.
+
+Validacion recomendada inmediata:
+1) Login superadmin, medico y paciente.
+2) Cambio de contraseña desde perfil (medico/paciente).
+3) Primer inicio medico/paciente (SI/NO).
+4) Medir tiempo login antes/despues en condiciones similares.
+
+Siguiente paso sugerido:
+- Instrumentar tiempos por seccion de login (superadmin/admin/paciente) para medir mejora exacta y seguir con optimizacion fina.

@@ -1,0 +1,78 @@
+﻿HOTFIX 2026-03-05 17:14:52
+Objetivo: corregir incidencias reportadas antes de continuar fases.
+
+RESUMEN
+1) Resultados de paciente vacíos aunque existan diagnósticos.
+2) Servicios visibles para todos permitían edición/borrado por otros médicos.
+3) Textos con caracteres corruptos en varios módulos.
+4) Superadmin debe ver/gestionar contraseña de doctores.
+5) Reparación adicional: sintaxis rota por ternarias dañadas en backend/frontend.
+
+ARCHIVOS TOCADOS
+- backend/API.gs.txt
+- backend/Database.gs.txt
+- js/admin.js
+- js/paciente.js
+- js/clinical.js
+- js/auth.js
+- js/superadmin.js
+- js/sidebar.js
+
+CAMBIOS CLAVE
+A. Estabilidad sintáctica total
+- Se restauraron ternarias dañadas en backend y frontend (patrones tipo `condicion valor : otro` -> `condicion ? valor : otro`).
+- Validación realizada con parser:
+  - backend/API.gs.txt OK
+  - backend/Database.gs.txt OK
+  - js/admin.js OK
+  - js/paciente.js OK
+  - js/clinical.js OK
+  - js/auth.js OK
+  - js/superadmin.js OK
+  - js/sidebar.js OK
+
+B. Diagnósticos visibles en paciente (punto 1)
+- En `js/paciente.js`:
+  - Se agregó `normalizePatientIdKey_` (normalización robusta de IDs).
+  - En `loadMyResults()`:
+    - se valida `res.success` antes de filtrar.
+    - se usa filtro por ID normalizado para evitar falsos vacíos por formato/caso/ceros.
+- En `backend/API.gs.txt` ya quedó activo el filtrado seguro de `diagnosticos_archivos` con `canRequesterSeePatient_` y normalización de ID.
+
+C. Servicios: solo propietario edita/borra (punto 2)
+- En `backend/API.gs.txt`:
+  - `save_service_full` ahora valida:
+    - requester presente
+    - requester sea admin o superadmin
+    - solo propietario (o superadmin) puede modificar servicio existente
+  - `delete_service_full` ahora valida:
+    - requester presente
+    - solo propietario (o superadmin) puede eliminar
+  - Se añadieron helpers:
+    - `getServiceOwnerMeta_`
+    - `canRequesterManageService_`
+- En `backend/Database.gs.txt` ya estaba reforzado:
+  - servicios sin owner: no los puede tomar un médico (solo superadmin)
+  - owner distinto: bloquea edición/borrado
+- En `js/admin.js`:
+  - la lista de servicios muestra botones Editar/Eliminar solo al propietario.
+  - para no propietario, muestra estado `Solo lectura`.
+
+D. Textos y enlaces dañados (punto 3)
+- Se limpiaron líneas con codificación rota en archivos críticos tocados durante el hotfix.
+- Se corrigieron enlaces con query dañada:
+  - `...?text=` en WhatsApp
+  - `...?t=` en llamadas con timestamp
+- Corregido regex de extracción de `fileId` en API:
+  - de `[&]id=` a `[?&]id=`
+
+E. Superadmin con contraseña de doctores (punto 4)
+- Se restableció exposición en payload de superadmin:
+  - `backend/API.gs.txt` `getSuperadminData_` incluye `password` por doctor.
+- En UI superadmin:
+  - `js/superadmin.js` vuelve a cargar `doctor.password` en modal de edición.
+  - `superadmin.html` mantiene campo de contraseña obligatorio para crear/editar.
+
+NOTAS TÉCNICAS
+- Se detectó ausencia de `.git` en este workspace, por lo que la recuperación fue directa sobre archivos.
+- Se evitó continuar fases nuevas hasta estabilizar sintaxis y permisos solicitados.

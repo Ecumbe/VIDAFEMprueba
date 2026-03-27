@@ -1,0 +1,59 @@
+FECHA: 2026-03-06 14:00:39
+TIPO: ajuste fino dashboard paciente + evolucion de infografias
+
+RESUMEN
+- Se compacto el bloque derecho del dashboard en escritorio para que la tarjeta inferior entre a primera vista sin pedir scroll inicial.
+- Se aumento en 1 segundo el autoplay del carrusel de infografias.
+- "Mas informacion" dejo de abrir enlace externo y ahora abre un modal con el contenido completo de la publicacion.
+- Se agrego una nueva accion independiente "Ir a fuente" para abrir enlaces externos.
+- Se mantuvo compatibilidad con publicaciones antiguas que ya tenian enlace en el campo legacy de informacion.
+
+ARCHIVOS TOCADOS
+- admin.html
+- js/admin.js
+- js/paciente.js
+- css/dashboard.css
+- backend/API.gs.txt
+
+DETALLE TECNICO
+1. Admin de infografias
+- Se actualizo la tarjeta de accion "Mas informacion" para que solo configure el texto del boton y su funcion local de modal.
+- Se agrego una nueva tarjeta de accion "Ir a fuente" con switch, texto configurable y URL externa.
+- Se adapto la carga, reseteo, edicion, validacion y guardado del formulario para los nuevos campos:
+  - show_btn_source
+  - btn_source_text
+  - btn_source_url
+
+2. Backend de infografias
+- Se extendio la hoja config_infografias agregando columnas nuevas para la accion de fuente externa.
+- Se modifico el mapeo y guardado para exponer:
+  - show_btn_source
+  - btn_source_text
+  - btn_source_url
+- Se elimino la validacion obligatoria de URL para "Mas informacion".
+- Se agrego validacion obligatoria de URL solo cuando "Ir a fuente" esta activo.
+- Se dejo fallback de compatibilidad: si una publicacion antigua tenia btn_info_url, ese enlace ahora se expone como fuente externa.
+
+3. Paciente / carrusel
+- Se subio el intervalo automatico del carrusel de 6500ms a 7500ms.
+- Se agrego truncado inteligente de texto para la vista previa del slide:
+  - si el texto es corto se muestra completo
+  - si es largo se muestra un resumen y el modal enseña el contenido completo
+- Se agrego apertura del modal reutilizando modalVisor para mostrar el texto completo de la publicacion.
+- Se agrego el nuevo boton visual "Ir a fuente".
+
+4. Dashboard escritorio
+- Se redujeron gaps, padding y alturas minimas del hero lateral y de las summary cards.
+- Se acoto visualmente el bloque de notas largas en escritorio para evitar que el panel derecho empuje la tarjeta inferior fuera del primer pantallazo.
+
+VALIDACIONES
+- node --check js/admin.js -> OK
+- node --check js/paciente.js -> OK
+- new Function(fs.readFileSync('backend/API.gs.txt','utf8')) -> OK
+
+OBSERVACION
+- No se hizo prueba visual en navegador desde este entorno. El siguiente paso manual recomendable es revisar:
+  - dashboard paciente en escritorio con vacaciones activas
+  - carrusel con texto corto y texto largo
+  - boton "Mas informacion" abriendo modal
+  - boton "Ir a fuente" abriendo enlace externo

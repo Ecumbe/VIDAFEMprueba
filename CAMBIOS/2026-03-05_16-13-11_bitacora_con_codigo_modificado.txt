@@ -1,0 +1,571 @@
+﻿BITACORA TECNICA CON CODIGO REAL MODIFICADO
+Fecha: 2026-03-05 16:13:11
+Nota: esta bitacora incluye fragmentos exactos de codigo aplicado.
+
+=== API - login sanitizado + get_data protegido ===
+Archivo: backend/API.gs.txt
+Rango: 33-125
+   33:       // ==========================================
+   34:       case "login":
+   35:         const loginUser = String(data.usuario || "").trim();
+   36:         const loginUserLower = normalizeTextLower_(loginUser);
+   37:         const loginCedula = normalizeDigits_(loginUser);
+   38: 
+   39:         // SUPERADMIN
+   40:         let superadmin = findSuperadminByUser_(loginUserLower);
+   41:         if (superadmin && String(superadmin.password) === String(data.password)) {
+   42:           response = { success: true, role: 'superadmin', data: sanitizeUserData_(superadmin) };
+   43:           break;
+   44:         }
+   45: 
+   46:         // A. Buscamos si es DOCTOR
+   47:         let admin = findRowFastByColumn_("usuarios_admin", "usuario", loginUserLower) || findRow("usuarios_admin", "usuario", loginUserLower);
+   48:         if (admin && String(admin.password) === String(data.password)) {
+   49:           const mustChange = hasOwnKey_(admin, "first_login")
+   50:             ? String(admin.first_login || "").toUpperCase() === "SI"
+   51:             : getFirstLoginValue_("usuarios_admin", "usuario", admin.usuario);
+   52:           response = {
+   53:             success: true,
+   54:             role: 'admin',
+   55:             data: sanitizeUserData_(admin),
+   56:             must_change_password: mustChange,
+   57:             first_login_role: "admin",
+   58:             first_login_id: admin.usuario
+   59:           };
+   60:           break;
+   61:         }
+   62: 
+   63:         // B. Buscamos si es PACIENTE
+   64:         let paciente = findRowFastByColumn_("pacientes", "cedula", loginCedula) || findRow("pacientes", "cedula", loginCedula);
+   65:         if (paciente && String(paciente.password) === String(data.password)) {
+   66:           const mustChange = hasOwnKey_(paciente, "first_login")
+   67:             ? String(paciente.first_login || "").toUpperCase() === "SI"
+   68:             : getFirstLoginValue_("pacientes", "id_paciente", paciente.id_paciente);
+   69:           response = {
+   70:             success: true,
+   71:             role: 'paciente',
+   72:             data: sanitizeUserData_(paciente),
+   73:             must_change_password: mustChange,
+   74:             first_login_role: "paciente",
+   75:             first_login_id: paciente.id_paciente
+   76:           };
+   77:           break;
+   78:         }
+   79: 
+   80:         // C. Fallo
+   81:         response = { success: false, message: "Usuario o contraseÃ±a incorrectos" };
+   82:         break;
+   83: 
+   84: 
+   85:       // ==========================================
+   86:       // 2. GESTIÃ“N DE DATOS (CRUD BÃSICO)
+   87:       // ==========================================
+   88:       case "get_data":
+   89:         const sheetName = data.sheet || "pacientes";
+   90:         if (sheetName === "usuarios_superadmin" || sheetName === "usuarios_admin") {
+   91:           response = { success: false, message: "Acceso denegado" };
+   92:           break;
+   93:         }
+   94:         const sheet = getConnection().getSheetByName(sheetName);
+   95:         if (!sheet) {
+   96:           response = { success: false, message: "Hoja no encontrada: " + sheetName };
+   97:         } else {
+   98:           // Si se pide la hoja 'pacientes' requerimos requester para filtrar por creado_por
+   99:           if (sheetName === 'pacientes') {
+  100:             const requester = data.requester;
+  101:             if (!requester) {
+  102:               response = { success: false, message: 'Acceso denegado: requester faltante' };
+  103:             } else {
+  104:               const rawData = sheet.getDataRange().getValues();
+  105:               const headers = rawData.shift();
+  106:               let json = rawData.map(row => {
+  107:                 let obj = {};
+  108:                 headers.forEach((h, i) => obj[h] = row[i]);
+  109:                 return obj;
+  110:               });
+  111:               // Filtrar solo pacientes creados por el requester
+  112:               json = json.filter(p => String(p.creado_por || p['creado_por'] || '').trim() === String(requester).trim());
+  113:               response = { success: true, data: json.reverse() };
+  114:             }
+  115:           } else if (sheetName === 'diagnosticos_archivos') {
+  116:             const requester = normalizeTextLower_(data.requester);
+  117:             if (!requester) {
+  118:               response = { success: false, message: 'Acceso denegado: requester faltante' };
+  119:             } else {
+  120:               const rawData = sheet.getDataRange().getValues();
+  121:               const headers = rawData.shift();
+  122:               let json = rawData.map(row => {
+  123:                 let obj = {};
+  124:                 headers.forEach((h, i) => obj[h] = row[i]);
+  125:                 return obj;
+
+=== API - servicios/protecciones/requester ===
+Archivo: backend/API.gs.txt
+Rango: 192-216
+  192:       // ==========================================
+  193:       // 3. MÃ“DULO DE SERVICIOS (MODULARIDAD)
+  194:       // ==========================================
+  195: 
+  196:       // ESTE ES VITAL: Lee la configuraciÃ³n para el Editor Visual
+  197:       case "get_service_config":
+  198:         // Usamos la funciÃ³n auxiliar definida al final de este archivo
+  199:         if (!data.requester) {
+  200:           response = { success: false, message: "Acceso denegado: requester faltante" };
+  201:         } else {
+  202:           response = { success: true, data: getServiceConfigMap(data.requester) };
+  203:         }
+  204:         break;
+  205: 
+  206:       // Para listas desplegables simples
+  207:       case "get_services":
+  208:         // Reutilizamos la config para sacar solo los nombres
+  209:         if (!data.requester) {
+  210:           response = { success: false, message: "Acceso denegado: requester faltante" };
+  211:         } else {
+  212:           response = { success: true, data: getServices(data.requester) };
+  213:         }
+  214:         break;
+  215: 
+  216:       // --- FUNCIONES MAESTRAS NUEVAS (CORREGIDAS) ---
+
+=== API - agenda/promos protegidas ===
+Archivo: backend/API.gs.txt
+Rango: 410-455
+  410: 
+  411:       case "get_taken_slots":
+  412:         if (!data.requester) {
+  413:           response = { success: false, message: "Acceso denegado: requester faltante" };
+  414:         } else {
+  415:           response = { success: true, data: getTakenSlots(data.fecha) };
+  416:         }
+  417:         break;
+  418: 
+  419: 
+  420:       // ==========================================
+  421:       // 7. PROMOCIONES
+  422:       // ==========================================
+  423:       case "save_promotion":
+  424:         if (!data.requester) {
+  425:           response = { success: false, message: "Acceso denegado: requester faltante" };
+  426:         } else if (!isSuperadminUser(data.requester) && !isAdminUser_(data.requester)) {
+  427:           response = { success: false, message: "Acceso denegado" };
+  428:         } else {
+  429:           response = savePromotion(data.data);
+  430:         }
+  431:         break;
+  432: 
+  433:       case "get_active_promotion":
+  434:         response = getActivePromotion();
+  435:         break;
+  436: 
+  437:       case "get_promo_list":
+  438:         if (!data.requester) {
+  439:           response = { success: false, message: "Acceso denegado: requester faltante" };
+  440:         } else if (!isSuperadminUser(data.requester) && !isAdminUser_(data.requester)) {
+  441:           response = { success: false, message: "Acceso denegado" };
+  442:         } else {
+  443:           response = getPromoConfig();
+  444:         }
+  445:         break;
+  446: 
+  447:       case "delete_promotion":
+  448:         if (!data.requester) {
+  449:           response = { success: false, message: "Acceso denegado: requester faltante" };
+  450:         } else if (!isSuperadminUser(data.requester) && !isAdminUser_(data.requester)) {
+  451:           response = { success: false, message: "Acceso denegado" };
+  452:         } else {
+  453:           response = deletePromotion(data.id);
+  454:         }
+  455:         break;
+
+=== API - file base64 protegido ===
+Archivo: backend/API.gs.txt
+Rango: 521-538
+  521:         response = superadminUpdatePatientManagement_(data.data || {});
+  522:         break;
+  523: 
+  524:       case "superadmin_delete_patient":
+  525:         if (!isSuperadminUser(data.requester)) {
+  526:           response = { success: false, message: "Acceso denegado" };
+  527:           break;
+  528:         }
+  529:         response = superadminDeletePatient_(data.patient_id);
+  530:         break;
+  531: 
+  532:       case "first_login_keep":
+  533:         response = completeFirstLogin_(data.role, data.user_id, "", data.requester);
+  534:         break;
+  535: 
+  536:       case "first_login_update_password":
+  537:         response = completeFirstLogin_(data.role, data.user_id, data.new_password, data.requester);
+  538:         break;
+
+=== API - timing logs + helpers de acceso ===
+Archivo: backend/API.gs.txt
+Rango: 632-740
+  632: function logApiTiming_(action, startMs, response) {
+  633:   try {
+  634:     const elapsed = Math.max(0, Date.now() - Number(startMs || Date.now()));
+  635:     const act = String(action || "").trim();
+  636:     if (act === "login") {
+  637:       const role = response && response.success ? String(response.role || "") : "fail";
+  638:       console.log("[API_TIMING] action=login role=" + role + " elapsed_ms=" + elapsed);
+  639:       return;
+  640:     }
+  641:     if (elapsed >= 1200) {
+  642:       console.log("[API_TIMING] action=" + act + " elapsed_ms=" + elapsed);
+  643:     }
+  644:   } catch (e) {}
+  645: }
+  646: 
+  647: function findRowFastByColumn_(sheetName, colName, value) {
+  648:   const lookup = String(value === undefined || value === null ? "" : value).trim();
+  649:   if (!lookup) return null;
+  650: 
+  651:   const sheet = getSheet(sheetName);
+  652:   if (!sheet) return null;
+  653:   const lastRow = sheet.getLastRow();
+  654:   const lastCol = sheet.getLastColumn();
+  655:   if (lastRow < 2 || lastCol < 1) return null;
+  656: 
+  657:   const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  658:   const colIndex = headers.indexOf(colName);
+  659:   if (colIndex === -1) return null;
+  660: 
+  661:   const searchRange = sheet.getRange(2, colIndex + 1, lastRow - 1, 1);
+  662:   const found = searchRange.createTextFinder(lookup).matchEntireCell(true).findNext();
+  663:   if (!found) return null;
+  664: 
+  665:   const rowValues = sheet.getRange(found.getRow(), 1, 1, lastCol).getValues()[0];
+  666:   const rowObj = {};
+  667:   for (let i = 0; i < headers.length; i++) {
+  668:     rowObj[headers[i]] = rowValues[i];
+  669:   }
+  670:   return rowObj;
+  671: }
+  672: 
+  673: function buildPatientOwnerMap_() {
+  674:   const rows = getTableData("pacientes");
+  675:   const map = {};
+  676:   for (let i = 0; i < rows.length; i++) {
+  677:     const pid = String(rows[i].id_paciente || "").trim();
+  678:     if (!pid) continue;
+  679:     map[pid] = normalizeTextLower_(rows[i].creado_por);
+  680:   }
+  681:   return map;
+  682: }
+  683: 
+  684: function canRequesterSeePatient_(requester, patientId, ownerMap) {
+  685:   const req = normalizeTextLower_(requester);
+  686:   const pid = String(patientId || "").trim();
+  687:   if (!req || !pid) return false;
+  688:   if (isSuperadminUser(req)) return true;
+  689:   if (req === pid) return true;
+  690:   const owners = ownerMap || {};
+  691:   return normalizeTextLower_(owners[pid]) === req;
+  692: }
+  693: 
+  694: function filterAppointmentsForRequester_(appointments, requester, ownerMap) {
+  695:   if (!Array.isArray(appointments)) return [];
+  696:   const req = normalizeTextLower_(requester);
+  697:   if (!req) return [];
+  698:   if (isSuperadminUser(req)) return appointments;
+  699:   const owners = ownerMap || {};
+  700:   return appointments.filter(appt => canRequesterSeePatient_(req, appt.id_paciente, owners));
+  701: }
+  702: 
+  703: function extractDriveFileIdFromUrl_(url) {
+  704:   const val = String(url || "");
+  705:   if (!val) return "";
+  706:   const m1 = val.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  707:   if (m1 && m1[1]) return m1[1];
+  708:   const m2 = val.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  709:   if (m2 && m2[1]) return m2[1];
+  710:   return "";
+  711: }
+  712: 
+  713: function canRequesterAccessFile_(requester, fileId) {
+  714:   const req = normalizeTextLower_(requester);
+  715:   const fid = String(fileId || "").trim();
+  716:   if (!req || !fid) return false;
+  717:   if (isSuperadminUser(req)) return true;
+  718: 
+  719:   const owners = buildPatientOwnerMap_();
+  720:   const reports = getHistoryByFileIdCandidate_(fid);
+  721:   for (let i = 0; i < reports.length; i++) {
+  722:     const rep = reports[i];
+  723:     if (!canRequesterSeePatient_(req, rep.id_paciente, owners)) continue;
+  724:     if (reportContainsFileId_(rep, fid)) return true;
+  725:   }
+  726:   return false;
+  727: }
+  728: 
+  729: function getHistoryByFileIdCandidate_(fileId) {
+  730:   const sheet = getConnection().getSheetByName("diagnosticos_archivos");
+  731:   if (!sheet) return [];
+  732:   const raw = sheet.getDataRange().getValues();
+  733:   if (raw.length <= 1) return [];
+  734:   const headers = raw[0];
+  735:   const idxPatient = headers.indexOf("id_paciente");
+  736:   const idxJson = headers.indexOf("datos_json");
+  737:   const idxPdf = headers.indexOf("pdf_link");
+  738:   if (idxPatient === -1) return [];
+  739:   const out = [];
+  740:   for (let i = 1; i < raw.length; i++) {
+
+=== API - sanitize + isAdminUser ===
+Archivo: backend/API.gs.txt
+Rango: 820-840
+  820: function normalizeDigits_(value) {
+  821:   return String(value === undefined || value === null ? "" : value).replace(/[^\d]/g, "");
+  822: }
+  823: 
+  824: function hasOwnKey_(obj, key) {
+  825:   return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
+  826: }
+  827: 
+  828: function sanitizeUserData_(row) {
+  829:   const src = row || {};
+  830:   const out = {};
+  831:   for (var key in src) {
+  832:     if (!Object.prototype.hasOwnProperty.call(src, key)) continue;
+  833:     if (String(key) === "password") continue;
+  834:     out[key] = src[key];
+  835:   }
+  836:   return out;
+  837: }
+  838: 
+  839: function normalizeDoctorPayload_(payload) {
+  840:   const out = payload || {};
+
+=== API - self/first login validaciones requester ===
+Archivo: backend/API.gs.txt
+Rango: 920-1008
+  920:   saturday.setHours(23, 59, 59, 999);
+  921: 
+  922:   let countToday = 0;
+  923:   let countWeek = 0;
+  924: 
+  925:   for (let i = 0; i < appointments.length; i++) {
+  926:     const appt = appointments[i];
+  927:     const pid = String(appt.id_paciente || "").trim();
+  928:     if (!ownPatientIds[pid]) continue;
+  929: 
+  930:     const apptDateStr = normalizeDateYmd_(appt.fecha);
+  931:     if (!apptDateStr) continue;
+  932: 
+  933:     if (apptDateStr === todayStr) countToday++;
+  934: 
+  935:     const apptDate = parseDateYmd_(apptDateStr);
+  936:     if (apptDate && apptDate >= monday && apptDate <= saturday) {
+  937:       countWeek++;
+  938:     }
+  939:   }
+  940: 
+  941:   return {
+  942:     total_pacientes: ownPatients.length,
+  943:     citas_hoy: countToday,
+  944:     citas_semana: countWeek
+  945:   };
+  946: }
+  947: 
+  948: function ensureFirstLoginColumn_(sheetName) {
+  949:   const sheet = getConnection().getSheetByName(sheetName);
+  950:   if (!sheet) return;
+  951:   const data = sheet.getDataRange().getValues();
+  952:   if (!data.length) return;
+  953:   const headers = data[0];
+  954:   if (headers.indexOf("first_login") !== -1) return;
+  955:   const newCol = headers.length + 1;
+  956:   sheet.getRange(1, newCol).setValue("first_login");
+  957:   if (sheet.getLastRow() > 1) {
+  958:     sheet.getRange(2, newCol, sheet.getLastRow() - 1, 1).setValues(
+  959:       new Array(sheet.getLastRow() - 1).fill(["NO"])
+  960:     );
+  961:   }
+  962: }
+  963: 
+  964: function getFirstLoginValue_(sheetName, keyCol, keyValue) {
+  965:   ensureFirstLoginColumn_(sheetName);
+  966:   const sheet = getConnection().getSheetByName(sheetName);
+  967:   if (!sheet) return false;
+  968:   const data = sheet.getDataRange().getValues();
+  969:   if (data.length <= 1) return false;
+  970:   const headers = data[0];
+  971:   const idxKey = headers.indexOf(keyCol);
+  972:   const idxFlag = headers.indexOf("first_login");
+  973:   if (idxKey === -1 || idxFlag === -1) return false;
+  974:   for (let i = 1; i < data.length; i++) {
+  975:     if (String(data[i][idxKey]).trim() === String(keyValue).trim()) {
+  976:       return String(data[i][idxFlag] || "").toUpperCase() === "SI";
+  977:     }
+  978:   }
+  979:   return false;
+  980: }
+  981: 
+  982: function completeFirstLogin_(role, userId, newPassword, requester) {
+  983:   const r = String(role || "").toLowerCase();
+  984:   const id = String(userId || "").trim();
+  985:   const pass = String(newPassword || "").trim();
+  986:   const req = String(requester || "").trim();
+  987:   if (!id || (r !== "admin" && r !== "paciente")) {
+  988:     return { success: false, message: "Datos incompletos." };
+  989:   }
+  990:   if (!req) {
+  991:     return { success: false, message: "Acceso denegado." };
+  992:   }
+  993:   const reqNorm = r === "admin" ? normalizeTextLower_(req) : req;
+  994:   const idNorm = r === "admin" ? normalizeTextLower_(id) : id;
+  995:   if (reqNorm !== idNorm) {
+  996:     return { success: false, message: "Acceso denegado." };
+  997:   }
+  998: 
+  999:   const sheetName = r === "admin" ? "usuarios_admin" : "pacientes";
+ 1000:   const keyCol = r === "admin" ? "usuario" : "id_paciente";
+ 1001:   ensureFirstLoginColumn_(sheetName);
+ 1002: 
+ 1003:   const sheet = getConnection().getSheetByName(sheetName);
+ 1004:   if (!sheet) return { success: false, message: "Hoja no encontrada." };
+ 1005:   const data = sheet.getDataRange().getValues();
+ 1006:   if (!data.length) return { success: false, message: "Hoja vacia." };
+ 1007:   const headers = data[0];
+ 1008:   const idxKey = headers.indexOf(keyCol);
+
+=== auth.js - first_login ahora envia requester ===
+Archivo: js/auth.js
+Rango: 30-74
+   30:     if (!wantsChange) {
+   31:         const keepRes = await firstLoginApiCall_({
+   32:             action: "first_login_keep",
+   33:             role: role,
+   34:             user_id: userId,
+   35:             requester: userId
+   36:         });
+   37:         if (!keepRes || !keepRes.success) {
+   38:             alert((keepRes && keepRes.message) || "No se pudo completar el primer ingreso.");
+   39:             return false;
+   40:         }
+   41:         return true;
+   42:     }
+   43: 
+   44:     const pass1 = prompt("Ingresa tu nueva contrasena:");
+   45:     if (pass1 === null) {
+   46:         const keepRes = await firstLoginApiCall_({
+   47:             action: "first_login_keep",
+   48:             role: role,
+   49:             user_id: userId,
+   50:             requester: userId
+   51:         });
+   52:         return !!(keepRes && keepRes.success);
+   53:     }
+   54: 
+   55:     const newPass = String(pass1 || "").trim();
+   56:     if (!newPass) {
+   57:         alert("La contrasena no puede estar vacia.");
+   58:         return false;
+   59:     }
+   60: 
+   61:     const pass2 = prompt("Confirma tu nueva contrasena:");
+   62:     if (pass2 === null) return false;
+   63:     if (newPass !== String(pass2)) {
+   64:         alert("Las contrasenas no coinciden.");
+   65:         return false;
+   66:     }
+   67: 
+   68:     const updRes = await firstLoginApiCall_({
+   69:         action: "first_login_update_password",
+   70:         role: role,
+   71:         user_id: userId,
+   72:         new_password: newPass,
+   73:         requester: userId
+   74:     });
+
+=== admin.js - promos ahora envian requester ===
+Archivo: js/admin.js
+Rango: 1026-1060
+ 1026: // 2. FunciÃ³n Borrar por ID
+ 1027: window.deletePromo = function (id) {
+ 1028:   if (!confirm("Â¿Borrar esta promociÃ³n?")) return;
+ 1029: 
+ 1030:   fetch(API_URL, {
+ 1031:     method: "POST",
+ 1032:     body: JSON.stringify({ action: "delete_promotion", id: id, requester: getRequesterFromSession() }),
+ 1033:   })
+ 1034:     .then((r) => r.json())
+ 1035:     .then((res) => {
+ 1036:       alert("PromociÃ³n eliminada.");
+ 1037:       loadPromoStatus(); // Recargar lista
+ 1038:     });
+ 1039: };
+ 1040: 
+ 1041: // 3. Listener del Formulario (Guardar)
+ 1042: const formPromo = document.getElementById("formPromo");
+ 1043: if (formPromo) {
+ 1044:   formPromo.addEventListener("submit", (e) => {
+ 1045:     e.preventDefault();
+ 1046:     const btn = formPromo.querySelector("button");
+ 1047:     btn.disabled = true;
+ 1048:     btn.innerText = "Guardando...";
+ 1049: 
+ 1050:     const data = {
+ 1051:       mensaje: document.getElementById("promoMsg").value,
+ 1052:       fecha_inicio: document.getElementById("promoStart").value,
+ 1053:       fecha_fin: document.getElementById("promoEnd").value,
+ 1054:     };
+ 1055: 
+ 1056:     fetch(API_URL, {
+ 1057:       method: "POST",
+ 1058:       body: JSON.stringify({ action: "save_promotion", data: data, requester: getRequesterFromSession() }),
+ 1059:     })
+ 1060:       .then((r) => r.json())
+
+=== diagnostico.js - get_file_base64/get_data con requester ===
+Archivo: js/diagnostico.js
+Rango: 286-292
+  286:     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+  287: 
+  288:     fetch(API_URL, {
+  289:       method: "POST",
+  290:       body: JSON.stringify({ action: "get_file_base64", file_id: fileId, requester: getRequesterFromSession() }),
+  291:     })
+  292:       .then((r) => r.json())
+
+=== diagnostico.js - get_data diagnosticos requesteado ===
+Archivo: js/diagnostico.js
+Rango: 1366-1370
+ 1366:     fetch(API_URL, {
+ 1367:     method: "POST",
+ 1368:     body: JSON.stringify({ action: "get_data", sheet: "diagnosticos_archivos", requester: getRequesterFromSession() }),
+ 1369:     })
+ 1370:     .then((r) => r.json())
+
+=== paciente.js - get_data diagnosticos + get_taken_slots requester ===
+Archivo: js/paciente.js
+Rango: 935-939
+  935:         method: "POST", 
+  936:         body: JSON.stringify({ action: "get_data", sheet: "diagnosticos_archivos", requester: currentPatientId }) 
+  937:     })
+  938:     .then(r => r.json())
+  939:     .then(res => {
+
+=== paciente.js - get_taken_slots requester ===
+Archivo: js/paciente.js
+Rango: 540-546
+  540: 
+  541:     timeSelect.innerHTML = "<option>Cargando...</option>";
+  542:     
+  543:     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "get_taken_slots", fecha: dateVal, requester: currentPatientId }) })
+  544:     .then(r => r.json())
+  545:     .then(res => {
+  546:         const taken = res.data || [];
+
+=== clinical.js - get_taken_slots requester ===
+Archivo: js/clinical.js
+Rango: 268-274
+  268:     
+  269:     timeSelect.innerHTML = '<option>Verificando...</option>';
+  270:     timeSelect.disabled = true;
+  271: 
+  272:     fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "get_taken_slots", fecha: dateVal, requester: getRequesterFromSession() }) })
+  273:     .then(r => r.json())
+  274:     .then(res => {

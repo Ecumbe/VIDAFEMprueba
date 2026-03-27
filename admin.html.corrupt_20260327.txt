@@ -1,0 +1,38 @@
+paciente.html:110:                <h2 class="section-title">Mis Citas Agendadas</h2>
+paciente.html:117:                <h2 class="section-title">Resultados y Diagnósticos</h2>
+paciente.html:127:                <h2 class="section-title">Mi Perfil</h2>
+js\service_builder_v2.js:96:    var nodes = view.querySelectorAll(".card, .section-title");
+js\service_builder_v2.js:366:              '<div class="sbv2-section-title">' +
+css\service_builder_v2.css:330:.sbv2-section-title {
+_backup_pre_word_20260304_172754\paciente.html:88:                <h2 class="section-title">Mis Citas Agendadas</h2>
+_backup_pre_word_20260304_172754\paciente.html:95:                <h2 class="section-title">Resultados y Diagnósticos</h2>
+_backup_pre_word_20260304_172754\admin.js:75:  const tbody = document.getElementById("patientsTableBody");
+_backup_pre_word_20260304_172754\admin.js:108:  const tbody = document.getElementById("patientsTableBody");
+_backup_pre_word_20260304_172754\admin.js:418:  const searchInput = document.getElementById("searchInput");
+_backup_pre_word_20260304_172754\admin.js:419:  if (!searchInput) return;
+_backup_pre_word_20260304_172754\admin.js:421:  searchInput.addEventListener("input", (e) => {
+_backup_pre_word_20260304_172754\admin.js:425:      document.getElementById("tableInfo").innerText =
+_backup_pre_word_20260304_172754\admin.js:435:      document.getElementById("tableInfo").innerText =
+js\admin.js:1136:  const tbody = document.getElementById("patientsTableBody");
+js\admin.js:1163:  const tbody = document.getElementById("patientsTableBody");
+js\admin.js:1568:  const searchInput = document.getElementById("searchInput");
+js\admin.js:1569:  if (!searchInput) return;
+js\admin.js:1571:  searchInput.addEventListener("input", (e) => {
+js\admin.js:1575:      document.getElementById("tableInfo").innerText =
+js\admin.js:1585:      document.getElementById("tableInfo").innerText =
+_backup_pre_word_20260304_172754\admin.html:104:                <div class="section-title">Resumen General</div>
+_backup_pre_word_20260304_172754\admin.html:140:                <h2 class="section-title">Gestión de Pacientes</h2>
+_backup_pre_word_20260304_172754\admin.html:145:                        <input type="text" id="searchInput" placeholder="Buscar por cédula, nombre...">
+_backup_pre_word_20260304_172754\admin.html:149:                        <i class="fas fa-plus"></i> Registrar Nuevo
+_backup_pre_word_20260304_172754\admin.html:164:                        <tbody id="patientsTableBody">
+_backup_pre_word_20260304_172754\admin.html:167:                    <p id="tableInfo" style="text-align:center; color:#999; font-size:0.8rem; margin-top:10px;">
+_backup_pre_word_20260304_172754\admin.html:175:                <h2 class="section-title">Configurar Promoción Vigente</h2>
+_backup_pre_word_20260304_172754\admin.html:218:                <h2 class="section-title">Tipos de Servicio</h2>
+_backup_pre_word_20260304_172754\admin.html:241:                    <h2 class="section-title" style="margin:0;">Agenda de Citas</h2>
+_backup_pre_word_20260304_172754\js\admin.js:75:  const tbody = document.getElementById("patientsTableBody");
+_backup_pre_word_20260304_172754\js\admin.js:108:  const tbody = document.getElementById("patientsTableBody");
+_backup_pre_word_20260304_172754\js\admin.js:418:  const searchInput = document.getElementById("searchInput");
+_backup_pre_word_20260304_172754\js\admin.js:419:  if (!searchInput) return;
+_backup_pre_word_20260304_172754\js\admin.js:421:  searchInput.addEventListener("input", (e) => {
+_backup_pre_word_20260304_172754\js\admin.js:425:      document.getElementById("tableInfo").innerText =
+_backup_pre_word_20260304_172754\js\admin.js:435:      document.getElementById("tableInfo").innerText =

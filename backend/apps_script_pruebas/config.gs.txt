@@ -1,0 +1,31 @@
+// ID de tu Hoja de Cálculo
+// PROYECTO DE PRUEBAS
+// Pega aqui el ID de una copia de pruebas de tu Google Sheet.
+// No uses aqui el archivo productivo.
+const SPREADSHEET_ID = "1qM8JXj8dNYLn8vaUh8kjw1fliYWLXv_T3pMNLdcxXiw";
+
+// ID de la Plantilla de Google Docs
+const TEMPLATE_ID = "1Y12yV26PskBfkEu2Kt0ksKutQmiTbzbPfdoaODZn-uQ";
+
+// ID del Archivo de Firma
+const SIGNATURE_ID = "1eR6B-HWTblsaQ3Mff5r6EzJFC-QC_xat";
+
+// Carpeta raiz separada para no mezclar archivos de prueba con produccion.
+const DRIVE_ROOT_FOLDER = "VIDAFEM_EXPEDIENTES_PRUEBAS";
+
+// En pruebas se dejan apagados para no enviar correos reales por accidente.
+const EMAILS_ENABLED = false;
+
+// Nombres exactos de las pestañas
+const SHEETS = {
+  PACIENTES: "pacientes",
+  HISTORIAL: "historial_clinico",
+  EXAMENES: "examenes",
+  CITAS: "citas",
+  ADMINS: "usuarios_admin",
+  DIAGNOSTICOS: "diagnosticos_archivos" // Nueva hoja maestra
+};
+
+function getConnection() {
+  return SpreadsheetApp.openById(SPREADSHEET_ID);
+}

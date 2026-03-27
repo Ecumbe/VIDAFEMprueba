@@ -1,0 +1,10 @@
+SUPABASE_URL=https://TU-PROYECTO.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=TU_SUPABASE_SERVICE_ROLE_KEY
+# Opcional y heredado: solo si quieres mantener un fallback temporal a Apps Script.
+# APPS_SCRIPT_API_URL=https://script.google.com/macros/s/TU_DEPLOYMENT_ID/exec
+SESSION_TTL_SECONDS=21600
+CORS_ALLOWED_ORIGINS=http://127.0.0.1:5500,http://localhost:5500
+# R2 se configura por binding en wrangler.toml:
+# [[r2_buckets]]
+# binding = "ASSETS_BUCKET"
+# bucket_name = "vidafem-private"

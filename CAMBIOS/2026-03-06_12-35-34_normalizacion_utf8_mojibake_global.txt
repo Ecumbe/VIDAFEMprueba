@@ -1,0 +1,75 @@
+NORMALIZACION UTF-8 / CORRECCION DE MOJIBAKE
+
+Fecha:
+- 2026-03-06 12:35:34
+
+Objetivo:
+- Revisar el sistema completo en busca de texto corrupto tipo mojibake.
+- Corregir simbolos, signos, tildes, eñes y emoji visibles afectados por mala recodificacion.
+- Registrar el trabajo en CAMBIOS para no perder continuidad.
+
+Barrido realizado:
+- Escaneo global con patron: `Ã|Â|â|ðŸ|�`
+- Se excluyeron bitacoras previas en `CAMBIOS`, logs y carpeta de respaldo `_backup_pre_word_20260304_172754`.
+- Resultado del barrido activo: 4 archivos afectados.
+
+Archivos corregidos:
+- `admin.html`
+- `paciente.html`
+- `js/paciente.js`
+- `backend/API.gs.txt`
+
+Metodo aplicado:
+- Reparacion controlada de recodificacion mojibake usando conversion `cp1252 -> utf8`.
+- La reparacion solo se escribio si el archivo reducia coincidencias sospechosas.
+- No se modifico logica de negocio, flujo, rutas, nombres de funciones ni estructuras de datos.
+- El objetivo fue exclusivamente textual/visual.
+
+Conteo antes/despues:
+- `admin.html`: 24 -> 0
+- `paciente.html`: 12 -> 0
+- `js/paciente.js`: 30 -> 0
+- `backend/API.gs.txt`: 22 -> 0
+
+Ejemplos de correccion aplicada:
+- `Panel MÃ©dico` -> `Panel Médico`
+- `GestiÃ³n de Pacientes` -> `Gestión de Pacientes`
+- `Cerrar SesiÃ³n` -> `Cerrar Sesión`
+- `Â¡Hola de nuevo! ðŸ‘‹` -> `¡Hola de nuevo! 👋`
+- `Cargando informaciÃ³n...` -> `Cargando información...`
+- `Resultados y DiagnÃ³sticos` -> `Resultados y Diagnósticos`
+- `AquÃ­ verÃ¡s` -> `Aquí verás`
+- `VÃ¡lido hasta` -> `Válido hasta`
+- `ContraseÃ±a` -> `Contraseña`
+- `DirecciÃ³n` -> `Dirección`
+- `OcupaciÃ³n` -> `Ocupación`
+- `AUTENTICACIÃ“N` -> `AUTENTICACIÓN`
+- `GESTIÃ“N` -> `GESTIÓN`
+- `DIAGNÃ“STICOS` -> `DIAGNÓSTICOS`
+- `HISTORIA CLÃNICA` -> `HISTORIA CLÍNICA`
+- `AcciÃ³n API no reconocida` -> `Acción API no reconocida`
+
+Alcance por archivo:
+- `admin.html`
+  Se normalizaron titulos, tooltips, labels de formulario, placeholders, mensajes de exito y el simbolo de cierre del modal.
+- `paciente.html`
+  Se normalizaron mensajes visibles del portal, encabezado de bienvenida, textos de resultados y modal de promociones.
+- `js/paciente.js`
+  Se corrigieron comentarios, mensajes visibles al paciente, textos de WhatsApp, visor de detalles y etiquetas medicas.
+- `backend/API.gs.txt`
+  Se corrigieron comentarios internos y mensajes JSON visibles en respuestas del API.
+
+Validacion posterior:
+- Re-escaneo global: `NO_MATCHES`
+- Parse JS frontend:
+  `OK js/paciente.js`
+- Parse backend GAS/JS:
+  `OK backend/API.gs.txt`
+
+Notas:
+- El render de algunos comandos de terminal puede seguir mostrando mojibake por la codificacion de consola, pero el escaneo por contenido del archivo ya quedo limpio.
+- No se tocaron archivos dentro de `CAMBIOS` anteriores para preservar historial.
+
+Resultado:
+- Quedo corregido el mojibake detectado en los archivos activos del sistema.
+- Se deja esta bitacora como referencia de alcance, metodo y validacion.

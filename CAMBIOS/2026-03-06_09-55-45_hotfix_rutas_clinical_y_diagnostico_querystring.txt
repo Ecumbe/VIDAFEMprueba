@@ -1,0 +1,15 @@
+﻿HOTFIX rutas clinical/diagnostico
+
+Problema:
+- Navegacion hacia clinical/diagnostico construida sin '?' en querystring.
+- Resultado: URLs tipo clinical.htmlid=... (404).
+
+Correccion:
+- js/admin.js
+  clinical.htmlid=${id} -> clinical.html?id=${id}
+- js/clinical.js
+  diagnostico.htmlpatientId=... -> diagnostico.html?patientId=...
+
+Validacion:
+- node --check js/admin.js OK
+- node --check js/clinical.js OK

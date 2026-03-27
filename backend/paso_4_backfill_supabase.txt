@@ -1,0 +1,183 @@
+PASO 4 PARA HACER BACKFILL HACIA SUPABASE
+
+QUE SIGNIFICA BACKFILL
+
+Backfill significa:
+- copiar a Supabase todos los datos que ya existen hoy en Google Sheets
+- para que Supabase no tenga solo los registros nuevos, sino tambien el historico
+
+IMPORTANTE
+
+- El backfill de este proyecto se corre desde Apps Script.
+- No se corre desde el navegador.
+- No se corre con la anon key.
+- Usa la service role key por medio de Script Properties.
+
+ARCHIVOS QUE YA QUEDARON LISTOS
+
+- backend/apps_script_pruebas/Backfill.gs.txt
+- backend/apps_script_pruebas/Database.gs.txt
+- backend/apps_script_pruebas/API.gs.txt
+- backend/apps_script_pruebas/config.gs.txt
+
+ANTES DE CORRER EL BACKFILL
+
+1. Abre Supabase.
+2. Entra a tu proyecto.
+3. Ve a SQL Editor.
+4. Ejecuta estos archivos si aun no lo has hecho:
+
+   backend/supabase_paso_1_servicios.sql
+   backend/supabase_paso_2_admin_reads.sql
+   backend/supabase_paso_3_datos_sensibles.sql
+
+5. Confirma que en Supabase ya existan como minimo estas tablas:
+
+   servicios
+   config_campos
+   config_promociones
+   config_vacaciones
+   config_infografias
+   pacientes
+   usuarios_admin
+   usuarios_superadmin
+   citas
+   historia_clinica
+   evolucion_paciente
+   diagnosticos_archivos
+
+6. Abre tu proyecto de Apps Script de pruebas.
+7. Ve a Project Settings.
+8. Busca Script Properties.
+9. Crea o confirma estas propiedades:
+
+   VIDAFEM_SUPABASE_SYNC_ENABLED = true
+   VIDAFEM_SUPABASE_URL = TU_PROJECT_URL_DE_SUPABASE
+   VIDAFEM_SUPABASE_SERVICE_ROLE = TU_SERVICE_ROLE_KEY
+
+10. Actualiza en Apps Script estos archivos locales:
+
+   backend/apps_script_pruebas/config.gs.txt
+   backend/apps_script_pruebas/Database.gs.txt
+   backend/apps_script_pruebas/API.gs.txt
+   backend/apps_script_pruebas/Backfill.gs.txt
+
+11. Guarda el proyecto.
+
+ORDEN RECOMENDADO PARA CORRERLO
+
+1. Ejecuta primero:
+
+   backfillPreviewToSupabase_
+
+2. Revisa el resultado en Execution log.
+   Esa funcion no copia nada.
+   Solo te dice cuantos registros hay por modulo.
+
+3. Ejecuta despues:
+
+   backfillCoreDataToSupabase_
+
+4. Espera a que termine.
+5. Revisa en Supabase estas tablas:
+
+   usuarios_admin
+   usuarios_superadmin
+   pacientes
+   citas
+   historia_clinica
+   evolucion_paciente
+   diagnosticos_archivos
+
+6. Si todo sale bien, ejecuta:
+
+   backfillSupportDataToSupabase_
+
+7. Revisa en Supabase estas tablas:
+
+   config_promociones
+   config_vacaciones
+   config_infografias
+   servicios
+   config_campos
+
+8. Si prefieres correr todo en una sola pasada, puedes ejecutar:
+
+   backfillEverythingToSupabase_
+
+   Pero solo es recomendable si el volumen de datos no es muy grande.
+
+SI APPS SCRIPT SE QUEDA SIN TIEMPO
+
+Corre los modulos por separado.
+
+Funciones disponibles:
+
+- backfillAdminsToSupabase_
+- backfillSuperadminsToSupabase_
+- backfillPatientsToSupabase_
+- backfillAppointmentsToSupabase_
+- backfillClinicalHistoryToSupabase_
+- backfillPatientEvolutionToSupabase_
+- backfillDiagnosesToSupabase_
+- backfillPromotionsToSupabase_
+- backfillDoctorVacationsToSupabase_
+- backfillInfographicsToSupabase_
+- backfillServicesToSupabase_
+
+Tambien aceptan rango opcional:
+
+   backfillPatientsToSupabase_(0, 200)
+   backfillPatientsToSupabase_(200, 200)
+   backfillPatientsToSupabase_(400, 200)
+
+Eso significa:
+- primer numero = desde que fila logica empezar
+- segundo numero = cuantos registros procesar
+
+VALIDACION DESPUES DEL BACKFILL
+
+1. En Supabase abre Table Editor.
+2. Verifica que los conteos se parezcan a Google Sheets.
+3. Prueba en la app:
+
+   - login admin
+   - login paciente
+   - login superadmin
+   - editar perfil
+   - cambiar contrasena
+   - crear paciente
+   - crear cita
+   - guardar historia clinica
+   - guardar evolucion
+   - guardar diagnostico
+   - crear promocion
+   - crear infografia
+   - editar vacaciones
+
+4. Si una accion funciona en Sheets pero devuelve warning de Supabase:
+   revisa Execution log en Apps Script
+   revisa la tabla de Supabase correspondiente
+   revisa que el SQL de esa tabla exista y que la columna esperada tambien exista
+
+DONDE QUEDAN LAS COSAS DESPUES DE ESTE PASO
+
+- Base de datos principal de lectura y destino de migracion: Supabase
+- Backend operativo temporal: Apps Script
+- Correos: por ahora siguen en Apps Script
+- WhatsApp: por ahora sigue como enlaces wa.me en frontend y correos
+
+LO SIGUIENTE DESPUES DEL BACKFILL
+
+1. Hacer smoke tests completos.
+2. Corregir cualquier diferencia entre Sheets y Supabase.
+3. Definir el Cloudflare Worker.
+4. Mover al Worker la logica sensible:
+
+   - autenticacion
+   - permisos
+   - mutaciones
+   - notificaciones
+   - acceso a Supabase con service credentials
+
+5. Dejar Apps Script solo como contingencia temporal y luego retirarlo.

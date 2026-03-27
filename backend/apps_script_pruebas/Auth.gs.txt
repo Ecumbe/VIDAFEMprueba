@@ -1,0 +1,51 @@
+// ==========================================
+// SISTEMA DE AUTENTICACIÓN (LOGIN)
+// ==========================================
+
+/**
+ * Función principal para iniciar sesión.
+ * Verifica primero si es Admin, si no, verifica si es Paciente.
+ */
+function loginUser(username, password) {
+  
+  // 1. INTENTO DE LOGIN COMO ADMINISTRADOR
+  // Buscamos en la hoja 'usuarios_admin' usando la columna 'usuario'
+  const adminUser = findRow(SHEETS.ADMINS, "usuario", username);
+  
+  // Si existe el admin y la contraseña coincide
+  if (adminUser && String(adminUser.password) === String(password)) {
+    return {
+      success: true,
+      role: "admin",
+      token: "admin_session_" + new Date().getTime(), // Token simple de sesión
+      data: {
+        nombre: adminUser.nombre_doctor,
+        usuario: adminUser.usuario
+      }
+    };
+  }
+
+  // 2. INTENTO DE LOGIN COMO PACIENTE
+  // Si no fue admin, buscamos en la hoja 'pacientes' usando la 'cedula' como usuario
+  const patientUser = findRow(SHEETS.PACIENTES, "cedula", username);
+
+  // Si existe el paciente y la contraseña coincide
+  if (patientUser && String(patientUser.password) === String(password)) {
+    return {
+      success: true,
+      role: "patient",
+      token: "patient_session_" + new Date().getTime(),
+      data: {
+        id: patientUser.id_paciente,
+        nombre: patientUser.nombre_completo,
+        email: patientUser.correo
+      }
+    };
+  }
+
+  // 3. SI NADA COINCIDE
+  return {
+    success: false,
+    message: "Credenciales incorrectas. Verifique usuario y contraseña."
+  };
+}

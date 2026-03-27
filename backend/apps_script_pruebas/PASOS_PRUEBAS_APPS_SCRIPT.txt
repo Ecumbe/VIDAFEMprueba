@@ -1,0 +1,73 @@
+OBJETIVO
+Crear un Apps Script de pruebas totalmente separado del sistema actual.
+
+ESTE PAQUETE YA ESTA LISTO EN:
+backend/apps_script_pruebas/
+
+ARCHIVOS QUE VAS A COPIAR AL APPS SCRIPT DE PRUEBAS
+- API.gs.txt
+- Auth.gs.txt
+- Database.gs.txt
+- config.gs.txt
+
+LO QUE YA DEJE AISLADO EN ESTE PAQUETE
+- La hoja de calculo NO viene apuntando a produccion.
+- La carpeta de Drive sera: VIDAFEM_EXPEDIENTES_PRUEBAS
+- Los correos estan apagados: EMAILS_ENABLED = false
+
+PASO 1
+Haz una COPIA de tu Google Sheet actual.
+Ese archivo sera tu base de datos de pruebas.
+
+PASO 2
+Abre un proyecto NUEVO de Google Apps Script.
+Ponle un nombre claro, por ejemplo:
+VIDAFEM PRUEBAS
+
+PASO 3
+Dentro de ese proyecto nuevo, crea estos archivos:
+- API.gs
+- Auth.gs
+- Database.gs
+- config.gs
+
+PASO 4
+Copia y pega el contenido de estos archivos del repo:
+- backend/apps_script_pruebas/API.gs.txt -> API.gs
+- backend/apps_script_pruebas/Auth.gs.txt -> Auth.gs
+- backend/apps_script_pruebas/Database.gs.txt -> Database.gs
+- backend/apps_script_pruebas/config.gs.txt -> config.gs
+
+PASO 5
+En config.gs reemplaza:
+AQUI_ID_HOJA_DE_PRUEBAS
+por el ID de la copia de tu Google Sheet de pruebas.
+
+PASO 6
+En Project Settings -> Script Properties crea estas propiedades SOLO en el proyecto de pruebas:
+- VIDAFEM_SUPABASE_SYNC_ENABLED = true
+- VIDAFEM_SUPABASE_URL = TU_PROJECT_URL
+- VIDAFEM_SUPABASE_SERVICE_ROLE = TU_SERVICE_ROLE_KEY
+
+IMPORTANTE
+La service role key solo va en Apps Script.
+No va en js/config.js.
+
+PASO 7
+Despliega este proyecto nuevo como Web App.
+Guarda la URL nueva de pruebas.
+
+PASO 8
+Para probar localmente este frontend con el Apps Script de pruebas:
+abre js/config.js y cambia temporalmente API_URL por la URL nueva de pruebas.
+
+ESO SOLO AFECTA TU CARPETA LOCAL
+No afecta produccion mientras no subas esos cambios a la rama publicada.
+
+PASO 9
+Cuando quieras volver a apuntar al sistema actual:
+restaura API_URL con la URL de produccion.
+
+REGLA DE ORO
+No copies nada de backend/apps_script_pruebas/ dentro del Apps Script que hoy esta funcionando.
+Ese paquete es solo para pruebas.

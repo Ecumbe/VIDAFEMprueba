@@ -1,0 +1,59 @@
+﻿FASE 2 - ENDURECIMIENTO GRADUAL SIN ROMPER FLUJO
+Fecha: 2026-03-05 15:52:50
+
+Objetivo de este bloque:
+- Subir seguridad sin cambiar UX principal ni romper WhatsApp/PDF funcional.
+
+Archivos modificados:
+- backend/API.gs.txt
+- js/auth.js
+- js/diagnostico.js
+- js/paciente.js
+
+Cambios aplicados en backend:
+1) get_data para diagnosticos_archivos ahora exige requester y filtra por permiso real:
+   - Paciente ve solo sus reportes.
+   - Medico ve solo reportes de sus pacientes.
+   - Superadmin mantiene visibilidad total.
+
+2) get_agenda ahora exige requester y filtra por permisos:
+   - Evita exponer agenda completa a llamadas directas sin contexto.
+
+3) get_file_base64 ahora exige requester y valida acceso al archivo:
+   - Verifica que el file_id pertenezca a un reporte accesible por requester.
+   - Mantiene el editor de imagen pero con control de acceso.
+
+4) first_login_keep / first_login_update_password:
+   - Ahora pasan requester a backend.
+   - Backend exige requester y valida coincidencia con user_id.
+
+5) self_update_password:
+   - Corrige hueco donde requester vacio podia pasar.
+   - requester ahora es obligatorio y debe coincidir con el usuario objetivo.
+
+Cambios en frontend para compatibilidad:
+1) auth.js
+   - first_login_keep y first_login_update_password ahora envian requester:userId.
+
+2) diagnostico.js
+   - get_file_base64 ahora envia requester desde sesion.
+   - get_data diagnosticos_archivos ahora envia requester desde sesion.
+
+3) paciente.js
+   - get_data diagnosticos_archivos ahora envia requester:currentPatientId.
+
+Impacto esperado:
+- Menor exposicion de datos clinicos por consultas mas acotadas.
+- Menor riesgo de cambio de clave por llamadas externas directas.
+- Sin cambios visuales para el usuario final.
+
+Riesgos controlados:
+- Si una sesion queda corrupta/sin requester, la API devolvera acceso denegado (comportamiento esperado de seguridad).
+
+Checklist de prueba recomendado:
+1) Login superadmin/admin/paciente.
+2) Primer inicio admin/paciente (omitir y cambiar clave).
+3) Cambio de clave en perfil (admin y paciente).
+4) Carga de resultados en paciente.
+5) Edicion de diagnostico y carga de imagen en diagnostico.js.
+6) Carga agenda doctor y acciones de estado/reagendar.

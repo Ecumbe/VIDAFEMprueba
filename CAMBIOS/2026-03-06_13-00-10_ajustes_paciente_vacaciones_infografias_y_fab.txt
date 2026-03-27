@@ -1,0 +1,268 @@
+AJUSTES PACIENTE / VACACIONES / INFOGRAFIAS / FAB MOVIL
+
+Fecha:
+- 2026-03-06 13:00:10
+
+Solicitado:
+1. Mover el boton flotante de agendar cita del paciente para que no choque con cerrar sesion.
+2. Asegurar que el ajuste movil no dañe la opcion de escritorio.
+3. Bloquear el agendamiento mientras aun se esta verificando vacaciones del medico.
+4. Mostrar aviso tambien en escritorio cuando el modal de agendar quede bloqueado por vacaciones.
+5. Simplificar la seccion de infografias: quitar URL visible, mover "Publicacion activa" abajo, usar switches y dejar acciones apagadas por defecto.
+
+Archivos modificados:
+- `paciente.html`
+- `js/paciente.js`
+- `css/dashboard.css`
+- `admin.html`
+- `js/admin.js`
+
+Resumen por punto:
+
+1. FAB movil movido al lado contrario
+- Se movio el FAB de `left` a `right`.
+- Se mantuvo visible solo en movil.
+- Se dejaron estados visuales para carga y bloqueo.
+
+Codigo relevante:
+`css/dashboard.css`
+```css
+.mobile-fab-schedule {
+    position: fixed;
+    right: 14px;
+    left: auto;
+    bottom: 16px;
+}
+```
+
+2. Restaurar y asegurar modo escritorio
+- Se agrego una regla explicita para escritorio:
+  `#btnOpenSelfSchedule` visible en desktop.
+  `.mobile-fab-schedule` oculto en desktop.
+- Ya no se deshabilita el boton de escritorio por vacaciones; ahora se marca visualmente y sigue permitiendo mostrar el aviso.
+
+Codigo relevante:
+`css/dashboard.css`
+```css
+@media (min-width: 769px) {
+    #btnOpenSelfSchedule {
+        display: inline-flex !important;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .mobile-fab-schedule {
+        display: none !important;
+    }
+}
+```
+
+3. Bloqueo de agendamiento mientras se verifica vacaciones
+- Se agrego estado de carga para vacaciones:
+  `loading`
+  `checked_once`
+  `error`
+- Ahora el modal de agendar se abre en modo "verificando" y no deja usar fecha/hora/submit hasta tener respuesta real.
+- Se revalida vacaciones otra vez justo antes de guardar la cita.
+- Tambien se cerro el hueco en reagendar para que no quede inconsistente.
+
+Codigo relevante:
+`js/paciente.js`
+```javascript
+let doctorVacationState_ = {
+    loading: true,
+    checked_once: false,
+    error: "",
+    active: false,
+    fecha_hasta: "",
+    titulo: "",
+    mensaje: "",
+    block_message: ""
+};
+let doctorVacationRequest_ = null;
+```
+
+`js/paciente.js`
+```javascript
+function ensureDoctorVacationStateLoaded_(forceRefresh, lockUi) {
+    if (!forceRefresh && doctorVacationState_.checked_once && !doctorVacationState_.loading && !doctorVacationState_.error) {
+        return Promise.resolve(doctorVacationState_);
+    }
+    return fetchDoctorVacationState_({ force: !!forceRefresh, silentError: !!forceRefresh, lockUi: !!lockUi });
+}
+```
+
+`js/paciente.js`
+```javascript
+ensureDoctorVacationStateLoaded_(true, true)
+    .then((vac) => {
+        if (!vac || vac.loading || vac.error) {
+            notify((vac && vac.error) || "No se pudo verificar si tu medico esta disponible.", "warning");
+            throw new Error("vacation_check_failed");
+        }
+        if (vac.active) {
+            notify(vac.block_message || "Tu medico no esta tomando nuevas citas por vacaciones.", "warning");
+            throw new Error("vacation_blocked");
+        }
+        return fetch(API_URL, { method: "POST", body: JSON.stringify({ action: "get_taken_slots", fecha: data.fecha, requester: currentPatientId }) });
+    })
+```
+
+4. Aviso tambien dentro del modal en escritorio
+- Se agrego un bloque visual dentro de `modalSelfAppt`.
+- Si el medico esta de vacaciones:
+  se muestra el aviso
+  se ocultan los campos
+  se oculta el boton de confirmar
+- Si aun se esta verificando:
+  se muestra estado de espera.
+
+Codigo relevante:
+`paciente.html`
+```html
+<div id="selfVacationGate" class="self-vacation-gate" style="display:none;">
+    <div class="self-vacation-gate-icon">
+        <i class="fas fa-umbrella-beach"></i>
+    </div>
+    <div class="self-vacation-gate-copy">
+        <h4 id="selfVacationGateTitle">Verificando disponibilidad...</h4>
+        <p id="selfVacationGateMsg">Estamos consultando si tu medico esta disponible para nuevas citas.</p>
+        <small>Disponible nuevamente desde: <strong id="selfVacationGateUntil">--</strong></small>
+    </div>
+</div>
+```
+
+`js/paciente.js`
+```javascript
+function updateSelfScheduleVacationNotice_() {
+    if (doctorVacationState_.loading) {
+        gate.style.display = "flex";
+        gate.classList.add("is-loading");
+        fields.style.display = "none";
+        submitWrap.style.display = "none";
+        return;
+    }
+
+    if (doctorVacationState_.error) {
+        gate.style.display = "flex";
+        gate.classList.add("is-error");
+        fields.style.display = "none";
+        submitWrap.style.display = "none";
+        return;
+    }
+
+    if (isDoctorVacationActive_()) {
+        gate.style.display = "flex";
+        fields.style.display = "none";
+        submitWrap.style.display = "none";
+        return;
+    }
+}
+```
+
+5. Limpieza de infografias
+- Se elimino el campo visible `Imagen por URL (opcional)`.
+- Se dejo `infImageUrl` oculto para compatibilidad con edicion de publicaciones existentes.
+- Se reorganizo la UI en tarjetas de accion.
+- Se cambiaron checkboxes por switches visuales.
+- `Agenda tu cita`, `Contactanos` y `Mas informacion` ahora arrancan apagados por defecto.
+- Sus campos ahora se ocultan y deshabilitan hasta que el switch correspondiente se active.
+- `Publicacion activa` fue movido al bloque inferior, justo arriba de guardar.
+
+Codigo relevante:
+`admin.html`
+```html
+<input type="hidden" id="infImageUrl">
+```
+
+`admin.html`
+```html
+<div class="inf-action-card">
+    <div class="inf-action-header">
+        <div class="vf-switch-copy">
+            <strong>Agenda tu cita</strong>
+            <small>Activa este boton para llevar al paciente al agendamiento.</small>
+        </div>
+        <label class="vf-switch" aria-label="Mostrar accion Agenda tu cita">
+            <input type="checkbox" id="infShowAgenda">
+            <span class="vf-switch-slider"></span>
+        </label>
+    </div>
+    <div class="inf-action-fields" id="infAgendaConfigRow">
+        <div class="form-group">
+            <label>Texto del boton</label>
+            <input type="text" id="infBtnAgenda" class="input-field" maxlength="40" value="Agenda tu cita">
+        </div>
+    </div>
+</div>
+```
+
+`admin.html`
+```html
+<div class="inf-control-footer">
+    <div class="inf-action-header inf-action-header--footer">
+        <div class="vf-switch-copy">
+            <strong>Publicacion activa</strong>
+            <small>Si la apagas, queda guardada pero deja de mostrarse a los pacientes.</small>
+        </div>
+        <label class="vf-switch" aria-label="Publicacion activa">
+            <input type="checkbox" id="infActive" checked>
+            <span class="vf-switch-slider"></span>
+        </label>
+    </div>
+</div>
+```
+
+`js/admin.js`
+```javascript
+if (agendaRow) agendaRow.style.display = showAgenda ? "block" : "none";
+if (infoRow) infoRow.style.display = showInfo ? "flex" : "none";
+if (contactRow) contactRow.style.display = showContact ? "block" : "none";
+if (agendaInput) agendaInput.disabled = !showAgenda;
+if (infoInput) infoInput.disabled = !showInfo;
+if (infoUrlInput) infoUrlInput.disabled = !showInfo;
+if (contactInput) contactInput.disabled = !showContact;
+```
+
+`js/admin.js`
+```javascript
+if (showAgenda) showAgenda.checked = false;
+if (showInfo) showInfo.checked = false;
+if (showContact) showContact.checked = false;
+```
+
+`css/dashboard.css`
+```css
+.vf-switch {
+    position: relative;
+    display: inline-flex;
+    width: 54px;
+    height: 30px;
+}
+
+.vf-switch input:checked + .vf-switch-slider {
+    background: linear-gradient(135deg, #e26170, #dd5566);
+}
+```
+
+Validaciones ejecutadas:
+- Parse JS:
+  `OK js/paciente.js`
+  `OK js/admin.js`
+- Verificacion de presencia de nuevos hooks/ids:
+  `selfVacationGate`
+  `ensureDoctorVacationStateLoaded_`
+  `infAgendaConfigRow`
+  `infContactConfigRow`
+  `vf-switch`
+
+Notas:
+- El backend ya bloqueaba vacaciones en `schedule_appointment` y `reschedule_appointment`; esta pasada reforzo y sincronizo la UX para que el bloqueo se vea antes y de forma consistente.
+- No se modifico logica de autenticacion ni estructuras de datos del backend.
+
+Resultado:
+- FAB movil reposicionado.
+- Escritorio protegido sin perder boton.
+- Agendamiento y reagendamiento reforzados contra la carrera de carga de vacaciones.
+- Aviso visible tambien dentro del modal en escritorio.
+- Editor de infografias mas limpio, con switches y acciones apagadas por defecto.

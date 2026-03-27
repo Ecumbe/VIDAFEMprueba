@@ -1,0 +1,107 @@
+﻿FASE 3 - Sesion token (base) + autoinyeccion frontend
+Fecha: 2026-03-05
+Objetivo: cerrar el bloque de session_token que habia quedado incompleto, sin romper flujos actuales.
+
+ARCHIVOS MODIFICADOS
+1) backend/API.gs.txt
+2) js/config.js
+
+CAMBIOS APLICADOS (CON CODIGO)
+
+[backend/API.gs.txt]
+A) Se completaron funciones faltantes de sesion:
+
+function getSessionTtlSeconds_() {
+  // CacheService en Apps Script soporta hasta 21600s (6h).
+  return 21600;
+}
+
+function issueSessionToken_(role, userId) {
+  const r = String(role || "").toLowerCase();
+  const uid = normalizeSessionUserId_(r, userId);
+  ...
+  const raw = uid + "|" + r + "|" + String(nowMs) + "|" + Utilities.getUuid();
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, raw);
+  const token = Utilities.base64EncodeWebSafe(bytes).replace(/=+$/g, "");
+  ...
+  CacheService.getScriptCache().put(getSessionCacheKey_(token), JSON.stringify(payload), ttlSec);
+  return { token: token, expires_at: payload.expires_at };
+}
+
+function resolveSessionContext_(token) {
+  const t = String(token || "").trim();
+  if (!t) return { ok: false };
+  const raw = CacheService.getScriptCache().get(getSessionCacheKey_(t));
+  if (!raw) return { ok: false };
+  ...
+  return {
+    ok: true,
+    role: String(obj.role || "").toLowerCase(),
+    user_id: String(obj.user_id || ""),
+    expires_at: String(obj.expires_at || "")
+  };
+}
+
+function requesterMatchesSession_(requester, session) {
+  if (!session || !session.ok) return false;
+  const role = String(session.role || "").toLowerCase();
+  const req = normalizeSessionUserId_(role, requester);
+  const sid = normalizeSessionUserId_(role, session.user_id);
+  return !!req && !!sid && req === sid;
+}
+
+B) Modo gradual para no romper:
+
+function requiresSessionToken_(action) {
+  // Modo gradual: arrancamos en compatibilidad (sin bloqueo duro) para no romper flujos.
+  const strictEnabled = false;
+  if (!strictEnabled) return false;
+  ...
+}
+
+C) Login ya emite token y expiracion:
+- response.session_token
+- response.session_expires_at
+
+[js/config.js]
+D) Se agrego lectura global de token de sesion:
+
+function getSessionToken_() {
+  try {
+    const raw = sessionStorage.getItem("vidafem_session");
+    if (!raw) return "";
+    const session = JSON.parse(raw);
+    return String((session && session.session_token) || "").trim();
+  } catch (e) {
+    return "";
+  }
+}
+window.getSessionToken = getSessionToken_;
+
+E) Se agrego parche global de fetch para inyectar session_token automaticamente
+solo en POST hacia API_URL y solo si no es login:
+
+(function patchApiFetchWithSessionToken_() {
+  ...
+  if (isApiCall && method === "POST" && typeof opts.body === "string" && opts.body) {
+    const payload = JSON.parse(opts.body);
+    if (payload && typeof payload === "object" && payload.action !== "login" && !payload.session_token) {
+      const token = getSessionToken_();
+      if (token) {
+        payload.session_token = token;
+        opts.body = JSON.stringify(payload);
+      }
+    }
+  }
+  ...
+})();
+
+IMPACTO
+- Se corrige el error tecnico (funciones faltantes) que podia romper el backend.
+- El token ya nace en login y viaja automaticamente en llamadas nuevas.
+- No se rompen flujos actuales porque strictEnabled quedo en false (modo compatibilidad).
+
+PENDIENTE DE LA FASE 3 (SIGUIENTE PASO)
+1) Activar strictEnabled = true por etapas (primero superadmin y self_*).
+2) Forzar relogin controlado para invalidar sesiones antiguas sin token.
+3) Opcional: revocacion explicita al cerrar sesion (token blacklist temporal o rotacion).

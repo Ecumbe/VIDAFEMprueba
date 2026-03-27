@@ -1,0 +1,83 @@
+FECHA: 2026-03-06 13:44:21
+TIPO: Ajuste fino visual dashboard paciente
+
+OBJETIVO
+- En escritorio mover la tarjeta:
+  "¡Hola de nuevo! / Bienvenida / Agendar cita"
+  a la parte superior del bloque derecho de tarjetas.
+- En movil aumentar un poco la altura visible de la infografia.
+- No tocar la logica de vacaciones, promociones, resultados ni el carrusel.
+
+ARCHIVOS MODIFICADOS
+- js/paciente.js
+- css/dashboard.css
+
+CAMBIOS
+
+1) REUBICACION DINAMICA DE LA TARJETA HERO
+- Se agrego `syncPatientHeroPlacement_()` para mover la tarjeta de bienvenida segun el ancho:
+  - escritorio: dentro de `.patient-home-sidebar`, arriba del grid de tarjetas
+  - movil: vuelve a quedar arriba del bloque principal como estaba
+- La funcion se ejecuta:
+  - al cargar el DOM
+  - al hacer resize
+  - al entrar a la vista `inicio`
+
+FRAGMENTO
+```javascript
+function syncPatientHeroPlacement_() {
+    const section = document.getElementById("view-inicio");
+    const layout = document.getElementById("patientHomeLayout");
+    const grid = document.getElementById("dashboardGrid");
+    if (!section || !layout || !grid) return;
+
+    const hero = section.querySelector(".patient-hero-card") || layout.querySelector(".patient-hero-card");
+    const sidebar = layout.querySelector(".patient-home-sidebar");
+    if (!hero || !sidebar) return;
+
+    if (window.innerWidth >= 901) {
+        if (hero.parentElement !== sidebar) sidebar.insertBefore(hero, grid);
+        return;
+    }
+
+    if (hero.parentElement !== section) section.insertBefore(hero, layout);
+}
+```
+
+2) ESCRITORIO: MAS ALTURA UTIL PARA LA INFOGRAFIA
+- Se aumento la altura minima del layout principal para que la infografia gane presencia vertical.
+- Se agrego un pequeno ajuste visual de la tarjeta hero cuando vive dentro del sidebar.
+
+FRAGMENTO
+```css
+.patient-home-layout {
+    min-height: clamp(520px, 70vh, 760px);
+}
+
+.patient-home-sidebar .patient-hero-card {
+    margin: 0 !important;
+}
+```
+
+3) MOVIL: INFOGRAFIA UN POCO MAS ALTA
+- Se incremento ligeramente la altura para que ocupe un poco mas de pantalla sin romper la composicion que ya habia quedado bien.
+
+FRAGMENTO
+```css
+@media (max-width: 900px) {
+    .patient-infographic-wrap,
+    .patient-infographic-stage {
+        min-height: 465px;
+        height: min(76vh, 520px);
+    }
+}
+```
+
+VALIDACION
+- Parse de `js/paciente.js`: `OK`
+
+OBSERVACION
+- No se tocaron:
+  - `backend/API.gs.txt`
+  - la logica de tarjetas
+  - la carga de imagen fallback de la infografia

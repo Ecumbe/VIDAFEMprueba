@@ -1,0 +1,44 @@
+PASO 3 PARA SINCRONIZAR PROMOCIONES DEL SISTEMA VIEJO HACIA SUPABASE
+
+Objetivo:
+- cuando guardes una promocion en Apps Script
+- tambien se copie a Supabase
+
+IMPORTANTE:
+Este paso usa la service role key en Apps Script.
+NO pongas esa key en el frontend.
+
+1. Abre tu proyecto de Apps Script.
+2. Ve a Project Settings.
+3. Busca Script Properties.
+4. Crea estas propiedades:
+
+VIDAFEM_SUPABASE_SYNC_ENABLED = true
+VIDAFEM_SUPABASE_URL = TU_PROJECT_URL_DE_SUPABASE
+VIDAFEM_SUPABASE_SERVICE_ROLE = TU_SERVICE_ROLE_KEY
+
+5. Abre el archivo local:
+   backend/Database.gs.txt
+
+6. Copia al Apps Script los cambios nuevos de ese archivo.
+   Lo minimo que debe quedar actualizado es:
+   - getSupabaseSyncConfig_
+   - supabaseRestRequest_
+   - buildPromotionSupabaseRow_
+   - syncPromotionToSupabase_
+   - deletePromotionFromSupabase_
+   - savePromotion
+   - deletePromotion
+
+7. Guarda el proyecto.
+8. Haz una nueva implementacion o actualiza la implementacion web app.
+
+Prueba:
+1. En admin crea una promocion nueva.
+2. Revisa que aparezca en el sistema.
+3. Revisa en Supabase que tambien exista en config_promociones.
+4. Revisa en paciente que la vea si aplica.
+
+Notas:
+- Si la sincronizacion con Supabase falla, la promocion igual se guarda en el sistema viejo.
+- En ese caso el sistema devolvera una advertencia, pero no deberia romperse.

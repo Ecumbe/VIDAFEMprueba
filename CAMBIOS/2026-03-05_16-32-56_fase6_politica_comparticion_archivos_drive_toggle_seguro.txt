@@ -1,0 +1,60 @@
+﻿FASE 6 - Politica de comparticion de archivos Drive con toggle seguro
+Fecha: 2026-03-05
+
+Objetivo
+- Continuar endurecimiento de PDFs/adjuntos sin romper flujo actual.
+- Mantener compatibilidad total por defecto.
+
+Archivo modificado
+1) backend/Database.gs.txt
+
+Que se hizo
+1. Se agrego helper de modo de enlaces publicos:
+
+function isPublicFileLinksEnabled_() {
+  // Modo compatible: por defecto se mantiene enlace publico.
+  // Para endurecer sin tocar codigo, definir Script Property:
+  // VIDAFEM_PUBLIC_FILE_LINKS = "false"
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty("VIDAFEM_PUBLIC_FILE_LINKS");
+    const val = String(raw === null || raw === undefined ? "" : raw).trim().toLowerCase();
+    if (val === "false" || val === "0" || val === "no" || val === "off") return false;
+    return true;
+  } catch (e) {
+    return true;
+  }
+}
+
+2. Se agrego helper central de politica de comparticion:
+
+function applyFileSharingPolicy_(file) {
+  if (!file) return;
+  if (!isPublicFileLinksEnabled_()) return;
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+}
+
+3. Se reemplazaron todos los setSharing directos por la politica central:
+- createPdfFromTemplateCompact(...)
+- createRecetaDocFixed(...)
+- handleExternalPdf(...)
+- generadores legacy de PDF/receta
+
+Ejemplo aplicado:
+Antes:
+pdfFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+
+Ahora:
+applyFileSharingPolicy_(pdfFile);
+
+Impacto real
+- HOY: no cambia nada (sigue funcionando como antes) porque por defecto queda publico con enlace.
+- MANANA (cuando quieras endurecer): solo cambias una Script Property, sin desplegar codigo nuevo.
+
+Como endurecer sin romper de golpe
+1) En Apps Script -> Project Settings -> Script Properties
+2) Agregar: VIDAFEM_PUBLIC_FILE_LINKS = false
+3) Desplegar version y probar con un grupo pequeno.
+
+Nota
+- Este cambio no toca WhatsApp ni la logica de generacion de PDFs.
+- Solo centraliza y controla la politica de comparticion de archivos.

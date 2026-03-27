@@ -1,0 +1,30 @@
+AMBIENTE DE PRUEBAS APPS SCRIPT
+
+Ya deje configurado el frontend para manejar 2 APIs:
+
+- Produccion
+- Pruebas
+
+COMPORTAMIENTO
+- Si abres la pagina normal, usa PRODUCCION.
+- Si abres la pagina con ?vf_env=test, usa PRUEBAS.
+
+EJEMPLOS
+- admin.html?vf_env=test
+- paciente.html?vf_env=test
+- clinical.html?vf_env=test
+- diagnostico.html?vf_env=test
+
+TU URL DE PRUEBAS YA QUEDO REGISTRADA EN:
+js/config.js
+
+IMPORTANTE
+- Esto no cambia produccion por defecto.
+- Solo entra al Apps Script nuevo cuando la URL lleve ?vf_env=test
+- Si quitas ese parametro, vuelve al Apps Script original.
+
+RECOMENDACION
+Mientras estemos migrando y probando:
+- usa siempre ?vf_env=test en las paginas de prueba
+- no subas a GitHub Pages nada que no quieras publicar aun
+- no toques el deployment activo del Apps Script original

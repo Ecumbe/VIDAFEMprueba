@@ -1,0 +1,26 @@
+- paciente
+
+id_paciente;	fecha_registro;	nombre_completo;	cedula;	password;	fecha_nacimiento;	telefono;	correo;		antecedentes_medicos;	direccion;	ocupacion;
+P-1768331749469;	2026-01-13;	HILDA CAROLA BODERO GARCIA;	0957003650;	12345;	2000-10-25;	0111111111;	obst.vidafem@gmail.com;				MIRAFLORES;	VENTAS;
+
+- diagnosticos_archivos
+id_reporte;	id_paciente;	tipo_examen;	fecha;	datos_json;	pdf_url;	creado_por;
+
+- Citas:
+id_cita	id_paciente;	fecha;	hora;	motivo;	estado;	fecha_registro;	nota_paciente;	recomendaciones_serv;	creado_por;
+
+- config_promociones
+id_promo;	mensaje;	fecha_inicio;	fecha_fin;	fecha_creacion;
+
+-historia_clinica
+id_paciente;	app;	apf;	alergias;	aqx;	menarquia;	prs;	num_parejas;	ago_g;	ago_p;	ago_c;	ago_a;	fecha_aborto;	pap;	fum;	anticonceptivos;	tipo_anti;	tiempo_uso;	tipo_ultimo;	fecha_actualizacion;
+
+
+- servicios
+id;	nombre_servicio;	recomendaciones;	titulo_reporte;
+
+- usuario_admin
+usuario;	password;	nombre_doctor;	rol;	correo_notificaciones;
+
+- config_campos
+servicio;	campo_nombre;	campo_etiqueta	campo_tipo;

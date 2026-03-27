@@ -1,0 +1,44 @@
+﻿FASE 2 - ENDURECIMIENTO ADICIONAL (ENDPOINTS)
+Fecha: 2026-03-05 16:03:26
+
+Archivos modificados:
+- backend/API.gs.txt
+- js/clinical.js
+- js/paciente.js
+- js/admin.js
+
+Cambios backend:
+1) get_data:
+   - Bloqueado acceso directo a hojas sensibles via get_data: usuarios_superadmin y usuarios_admin.
+
+2) get_service_config y get_services:
+   - requester ahora obligatorio.
+
+3) get_taken_slots:
+   - requester ahora obligatorio.
+
+4) get_promo_list:
+   - requester obligatorio.
+   - Solo permitido para superadmin o usuario admin (medico autenticado).
+   - Se agrega helper isAdminUser_(usuario).
+
+Cambios frontend de compatibilidad:
+1) clinical.js:
+   - get_taken_slots ahora envia requester via getRequesterFromSession().
+
+2) paciente.js:
+   - get_taken_slots ahora envia requester: currentPatientId en todos sus llamados.
+
+3) admin.js:
+   - get_promo_list ahora envia requester via getRequesterFromSession().
+
+Impacto esperado:
+- Menor superficie de lectura de datos sensibles.
+- Menor riesgo de scraping anonimo de horarios.
+- Mantiene flujo funcional para paciente, medico y superadmin.
+
+Checklist rapido de validacion:
+1) Doctor: abrir agenda y ver horas disponibles.
+2) Paciente: abrir agenda de auto-agendamiento y reagendamiento.
+3) Admin/medico: abrir panel de promociones (lista).
+4) Servicios: cargar editor visual y listas de servicios.

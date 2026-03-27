@@ -1,0 +1,26 @@
+.vscode/
+
+# Local runtime files
+*.log
+*.err
+*.out
+.server.log
+.server.err
+.tunnel.log
+.tunnel.err
+.tunnel.err.log
+.tunnel.out.log
+
+# Dependencies / local tooling
+node_modules/
+cloudflare-worker/node_modules/
+cloudflare-worker/.wrangler/
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+cloudflare-worker/.dev.vars
+
+# Backups
+_backup_pre_word_20260304_172754/

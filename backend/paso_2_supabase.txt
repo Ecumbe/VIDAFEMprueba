@@ -1,0 +1,27 @@
+PASO 2 PARA SEGUIR USANDO SUPABASE EN EL SISTEMA
+
+Este paso mueve lecturas del panel admin a Supabase:
+- promociones
+- vacaciones
+- infografias
+
+1. Abre Supabase.
+2. Entra a SQL Editor.
+3. Crea una consulta nueva.
+4. Abre el archivo:
+   backend/supabase_paso_2_admin_reads.sql
+5. Copia todo.
+6. Pegalo en SQL Editor.
+7. Ejecuta la consulta.
+
+Despues de eso solo recarga:
+- admin.html
+
+Que ya quedo conectado en este paso:
+- get_promo_list
+- get_my_vacation
+- get_infographic_posts_admin
+
+Si Supabase falla:
+- el sistema vuelve al Apps Script viejo automaticamente
+- no deberia romperse la pagina

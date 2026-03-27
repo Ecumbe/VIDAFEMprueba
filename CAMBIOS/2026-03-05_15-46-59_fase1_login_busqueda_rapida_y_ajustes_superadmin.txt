@@ -1,0 +1,29 @@
+﻿FASE 1 - AJUSTES ADICIONALES DE RENDIMIENTO LOGIN
+Fecha: 2026-03-05 15:46:59
+
+Archivo modificado:
+- backend/API.gs.txt
+
+Mejoras adicionales aplicadas:
+1) Login usa busqueda rapida por columna (TextFinder) para admin y paciente.
+   - Nueva funcion: findRowFastByColumn_(sheetName, colName, value).
+   - En login se intenta busqueda rapida y se mantiene fallback a findRow clasico.
+   - Beneficio: menor lectura completa de hojas en autenticacion.
+
+2) Busqueda de superadmin optimizada.
+   - findSuperadminByUser_ ahora ubica fila por columna usuario y lee solo esa fila.
+   - Antes recorria toda la hoja superadmin.
+
+3) Superadmin seed queda opcional (no automatico)
+   - getSuperadminSheet_(options) ahora solo siembra seed con ensureSeed=true.
+   - Alineado con decision de usar credenciales reales en usuarios_superadmin.
+
+Compatibilidad/No-regresion:
+- Se mantiene fallback de login al metodo previo.
+- No se cambia interfaz ni contratos de respuesta.
+- No se alteran WhatsApp ni PDF.
+
+Pendiente de validacion en tu entorno:
+1) Login superadmin/admin/paciente.
+2) Primer login admin/paciente.
+3) Tiempos comparativos de login en horas de alta carga.

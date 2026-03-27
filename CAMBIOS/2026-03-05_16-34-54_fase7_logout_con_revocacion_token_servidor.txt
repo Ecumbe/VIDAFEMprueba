@@ -1,0 +1,66 @@
+﻿FASE 7 - Logout con revocacion de token en servidor
+Fecha: 2026-03-05
+
+Objetivo
+- Cerrar sesion local + invalidar token en cache del backend.
+- Mantener flujo igual para usuario (sin cambios visuales).
+
+Archivos modificados
+1) backend/API.gs.txt
+2) js/config.js
+3) js/sidebar.js
+4) js/superadmin.js
+
+CAMBIO 1 - Nuevo endpoint logout en API
+Archivo: backend/API.gs.txt
+
+Se agrego en switch(action):
+
+case "logout":
+  response = logoutSession_(data.session_token);
+  break;
+
+Se agrego helper:
+
+function logoutSession_(token) {
+  const t = String(token || "").trim();
+  if (!t) return { success: true, message: "Sesion cerrada." };
+  try {
+    CacheService.getScriptCache().remove(getSessionCacheKey_(t));
+  } catch (e) {}
+  return { success: true, message: "Sesion cerrada." };
+}
+
+CAMBIO 2 - Cliente global para logout remoto
+Archivo: js/config.js
+
+window.apiLogoutSession = async function apiLogoutSession() {
+  try {
+    const token = getSessionToken_();
+    if (!token) return { success: true };
+    const r = await fetch(API_URL, {
+      method: "POST",
+      body: JSON.stringify({ action: "logout", session_token: token })
+    });
+    const j = await r.json();
+    return j || { success: true };
+  } catch (e) {
+    return { success: false, message: String(e || "") };
+  }
+};
+
+CAMBIO 3 - Uso en cierre de sesion lateral
+Archivo: js/sidebar.js
+
+Antes de limpiar sessionStorage:
+try { if (window.apiLogoutSession) await window.apiLogoutSession(); } catch (err) {}
+
+CAMBIO 4 - Uso en cierre de sesion superadmin
+Archivo: js/superadmin.js
+
+Antes de limpiar sessionStorage:
+try { if (window.apiLogoutSession) await window.apiLogoutSession(); } catch (e) {}
+
+Impacto
+- Si el usuario cierra sesion, el token ya no sigue valido hasta expiracion.
+- Si falla internet/backend al cerrar, igual se limpia sesion local (no bloquea salida).

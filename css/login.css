@@ -1,0 +1,240 @@
+/* css/login.css - DISEÑO FINAL VIDAFEM */
+
+:root {
+    /* --- AQUI PUEDES CAMBIAR LOS COLORES PRINCIPALES --- */
+    --color-primary-dark: #36235d;  /* El violeta oscuro (letras y botones) */
+    --color-primary-light: #b5b3da; /* El lila suave (iconos) */
+    --color-accent: #bd9cc9;        /* El rosado (detalles) */
+    
+    /* --- AQUI CAMBIAS EL COLOR DE FONDO DE LA PANTALLA DEL CELULAR --- */
+    /* Antes era #ffffff (blanco), ahora es un lila muy pálido casi blanco */
+    --bg-mobile-tint: #fbfaff;      
+    
+    --text-dark: #2c3e50;
+    --text-muted: #7f8c8d;
+}
+
+/* 1. RESET GLOBAL */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html, body {
+    height: 100%;
+    font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--bg-mobile-tint); 
+    overflow-x: hidden;
+}
+
+/* =========================================
+   2. SPLASH SCREEN (La pantalla de intro)
+   ========================================= */
+.splash-screen {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: #ffffff; /* El fondo de la intro se queda blanco puro */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 9999;
+    transition: opacity 0.8s ease-in-out;
+}
+
+.splash-logo {
+    /* --- AQUI CAMBIAS EL TAMAÑO DEL LOGO DE LA INTRO --- */
+    width: 250px; 
+    height: auto;
+    animation: pulseLogo 2s infinite ease-in-out;
+}
+
+.splash-screen.fade-out { opacity: 0; }
+
+@keyframes pulseLogo {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.05); opacity: 0.8; }
+}
+
+
+/* =========================================
+   3. DISEÑO DEL FORMULARIO (MODO CELULAR)
+   ========================================= */
+.login-wrapper {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column; 
+}
+
+/* El lado visual está oculto en celular */
+.visual-side { display: none; }
+
+/* ESTE ES EL CONTENEDOR PRINCIPAL EN EL MÓVIL */
+.form-side {
+    flex: 1;
+    /* --- AQUI SE APLICA EL FONDO LILA TENUE EN EL CELULAR --- */
+    background: var(--bg-mobile-tint);
+    
+    padding: 2rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    animation: slideUpFade 0.8s ease-out backwards;
+    animation-delay: 1.8s;
+}
+
+@keyframes slideUpFade {
+    from { opacity: 0; transform: translateY(30px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.login-header {
+    text-align: center;
+    margin-bottom: 2rem;
+}
+
+/* --- AQUI CAMBIAS EL TAMAÑO DEL LOGO DEL FORMULARIO --- */
+.form-logo {
+    width: 200px; /* Antes era 120px, ahora es más grande */
+    margin-bottom: 15px;
+}
+
+.login-header h1 {
+    color: var(--color-primary-dark);
+    font-size: 1.8rem;
+    font-weight: 700;
+}
+
+.login-header p {
+    color: var(--text-muted);
+    margin-top: 5px;
+}
+
+/* Estilos de los Inputs (Cajas de texto) */
+.input-group {
+    position: relative;
+    margin-bottom: 1.2rem;
+    background: #ffffff; /* Las cajas de texto sí son blancas para contraste */
+    border-radius: 12px;
+    border: 2px solid transparent; /* Sin borde visible por defecto */
+    transition: all 0.3s;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.03); /* Sombra muy sutil */
+}
+
+/* --- AQUI CAMBIAS EL COLOR DEL BORDE AL HACER CLIC EN EL INPUT --- */
+.input-group:focus-within {
+    border-color: var(--color-accent);
+    box-shadow: 0 5px 15px rgba(189, 156, 201, 0.15);
+}
+
+.input-icon {
+    position: absolute;
+    left: 15px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--color-primary-light);
+    font-size: 1.1rem;
+}
+
+/* Estilos del OJO para ver contraseña */
+.toggle-password {
+    position: absolute;
+    right: 15px; /* Pegado a la derecha */
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 5px; /* Espacio para facilitar el click con el dedo */
+}
+
+.input-group input {
+    width: 100%;
+    /* Ajuste de relleno para no tapar los iconos */
+    padding: 16px 45px 16px 50px; 
+    border: none;
+    background: transparent;
+    font-size: 1rem;
+    color: var(--text-dark);
+    outline: none;
+}
+
+/* Botón Principal (INGRESAR) */
+.btn-login {
+    width: 100%;
+    padding: 16px;
+    /* --- AQUI CAMBIAS EL COLOR DEL BOTÓN PRINCIPAL --- */
+    background: var(--color-primary-dark);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    font-size: 1.1rem;
+    font-weight: 700;
+    cursor: pointer;
+    margin-top: 10px;
+    box-shadow: 0 10px 20px -10px rgba(54, 35, 93, 0.5);
+    transition: transform 0.2s;
+}
+
+.btn-login:active { transform: scale(0.98); }
+
+/* Enlaces y Textos pequeños */
+.actions { text-align: right; margin-bottom: 1.5rem; }
+.forgot-pass { color: var(--text-muted); font-size: 0.9rem; text-decoration: none; }
+.status-message { text-align: center; margin-top: 15px; font-size: 0.9rem; min-height: 20px;}
+
+/* Footer */
+.login-footer {
+    margin-top: auto;
+    text-align: center;
+    padding-top: 30px;
+}
+
+.btn-whatsapp-minimal {
+    display: inline-flex;
+    align-items: center;
+    color: #25D366; /* Verde WhatsApp */
+    font-weight: 600; text-decoration: none;
+    padding: 10px 20px;
+    border-radius: 30px;
+    background: #e6fcf0;
+    transition: background 0.3s;
+}
+.app-version { text-align: center; font-size: 0.75rem; color: var(--text-muted); opacity: 0.6; margin-top: 20px; }
+
+
+/* =========================================
+   4. MODO ESCRITORIO (PC/TABLET)
+   ========================================= */
+@media (min-width: 900px) {
+    
+    .login-wrapper {
+        flex-direction: row;
+        /* Fondo degradado general en PC */
+        background: linear-gradient(135deg, var(--color-primary-dark) 0%, var(--color-primary-light) 100%);
+    }
+
+    /* Muestra la parte izquierda decorativa */
+    .visual-side {
+        display: flex;
+        flex: 1.2;
+        justify-content: center;
+        align-items: center;
+        color: white;
+        padding: 4rem;
+    }
+
+    .visual-content h2 { font-size: 3.5rem; line-height: 1.1; margin-bottom: 1rem; }
+    .visual-content p { font-size: 1.2rem; opacity: 0.9; }
+
+    /* Estilos de la TARJETA en PC */
+    .form-side {
+        flex: 0.8;
+        max-width: 550px;
+        margin: 4rem;
+        border-radius: 24px;
+        /* --- EN PC EL FONDO DE LA TARJETA SE QUEDA BLANCO PARA RESALTAR --- */
+        background: #ffffff; 
+        box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25);
+    }
+}

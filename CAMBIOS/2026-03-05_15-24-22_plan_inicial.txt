@@ -1,0 +1,46 @@
+﻿VIDAFEM - Registro de cambios
+Fecha: 2026-03-05
+Hora: PLAN INICIAL
+
+Contexto:
+- Se solicita plan de trabajo detallado.
+- Prioridad: mejorar velocidad de login sin romper flujos de WhatsApp y PDF.
+- Mantener funcionalidad actual de notificaciones y comparticion inmediata de reportes.
+
+Resumen de riesgos observados:
+1) Seguridad: autenticacion basada en requester del cliente.
+2) Seguridad: contrasenas en texto plano y visibles en algunos flujos.
+3) Seguridad: superadmin de prueba hardcodeado.
+4) Rendimiento: login tarda aprox. 15 segundos.
+5) Mantenibilidad: funciones duplicadas en backend Database.
+
+Plan propuesto (sin aplicar aun):
+Fase 1 - Estabilizacion rapida de login (sin romper UX)
+- Medir tiempos exactos de cada paso del login (cliente y servidor).
+- Optimizar lectura de hojas (evitar lecturas completas repetidas).
+- Crear indice/cache liviano de usuarios para autenticar mas rapido.
+- Mantener respuesta compatible con frontend actual.
+
+Fase 2 - Seguridad progresiva sin romper WhatsApp/PDF
+- Mantener WhatsApp para notificaciones, pero evitar enviar contrasenas en mensajes.
+- Mantener PDF compartible, pero mover a links con control (token/expiracion) cuando aplique.
+- Quitar superadmin de prueba hardcodeado y moverlo a provision segura.
+
+Fase 3 - Control real de sesion
+- Introducir token de sesion firmado en servidor.
+- Dejar requester como dato auxiliar, no como fuente de autorizacion.
+- Aplicar validacion de token en endpoints sensibles primero.
+
+Fase 4 - Limpieza tecnica y reduccion de riesgos de regresion
+- Eliminar funciones duplicadas en Database.gs.
+- Unificar conexion a Spreadsheet (una sola estrategia).
+- Mantener capa de compatibilidad para no romper pantallas actuales.
+
+Fase 5 - Endurecimiento final
+- Hash de contrasenas (migracion gradual).
+- Reglas de permisos por rol y accion.
+- Auditoria final de rutas criticas (login, pacientes, diagnosticos, superadmin).
+
+Nota:
+- Este archivo se crea como primer registro de la carpeta CAMBIOS.
+- Cada cambio futuro debe generar un archivo nuevo con fecha y hora.

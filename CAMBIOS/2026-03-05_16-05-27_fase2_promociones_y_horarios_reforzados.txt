@@ -1,0 +1,37 @@
+﻿FASE 2 - PROMOCIONES Y HORARIOS REFORZADOS
+Fecha: 2026-03-05 16:05:27
+
+Archivos modificados:
+- backend/API.gs.txt
+- js/admin.js
+
+Cambios backend:
+1) save_promotion:
+   - requester obligatorio.
+   - solo roles autorizados (superadmin o admin).
+
+2) delete_promotion:
+   - requester obligatorio.
+   - solo roles autorizados (superadmin o admin).
+
+3) get_promo_list:
+   - requester obligatorio.
+   - solo roles autorizados (superadmin o admin).
+
+4) get_taken_slots:
+   - requester obligatorio (ya reforzado en este ciclo).
+
+Cambios frontend:
+1) admin.js:
+   - delete_promotion ahora envia requester.
+   - save_promotion ahora envia requester.
+   - get_promo_list ya enviaba requester desde ajuste previo.
+
+Objetivo:
+- Evitar cambios de promociones por llamadas externas no autenticadas.
+- Reducir consultas anonimas de disponibilidad de horarios.
+
+Validacion recomendada:
+1) Admin/superadmin: crear y borrar promociones.
+2) Admin/superadmin: listar promociones.
+3) Doctor/paciente: consultar horarios disponibles segun sus flujos.

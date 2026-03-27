@@ -1,0 +1,460 @@
+// ==========================================
+// Backfill.gs
+// Utilidades para poblar Supabase con lo que ya existe en Google Sheets.
+// Ejecuta estas funciones manualmente desde Apps Script.
+// ==========================================
+
+function backfillIsSupabaseReady_() {
+  var cfg = getSupabaseSyncConfig_();
+  return !!(cfg && cfg.enabled && cfg.url && cfg.serviceRole);
+}
+
+function backfillAssertSupabaseReady_() {
+  if (backfillIsSupabaseReady_()) return;
+  throw new Error(
+    "Supabase sync no esta listo. Revisa Script Properties: " +
+    "VIDAFEM_SUPABASE_SYNC_ENABLED, VIDAFEM_SUPABASE_URL y VIDAFEM_SUPABASE_SERVICE_ROLE."
+  );
+}
+
+function backfillGetSheetSafe_(sheetName) {
+  try {
+    return getConnection().getSheetByName(String(sheetName || "").trim());
+  } catch (e) {
+    return null;
+  }
+}
+
+function backfillReadSheetRowsFromSheet_(sheet) {
+  if (!sheet) return [];
+  var raw = sheet.getDataRange().getValues();
+  if (!raw || raw.length <= 1) return [];
+
+  var headers = raw[0];
+  var rows = [];
+  for (var i = 1; i < raw.length; i++) {
+    rows.push(mapSheetRowObject_(headers, raw[i]));
+  }
+  return rows;
+}
+
+function backfillReadSheetRows_(sheetName) {
+  return backfillReadSheetRowsFromSheet_(backfillGetSheetSafe_(sheetName));
+}
+
+function backfillSliceRows_(rows, startIndex, limit) {
+  var list = Array.isArray(rows) ? rows : [];
+  var start = Number(startIndex || 0);
+  var max = Number(limit || 0);
+  if (!isFinite(start) || start < 0) start = 0;
+  if (!isFinite(max) || max <= 0) return list.slice(start);
+  return list.slice(start, start + max);
+}
+
+function backfillBuildResult_(moduleName, totalAvailable, startIndex, attempted) {
+  var start = Number(startIndex || 0);
+  if (!isFinite(start) || start < 0) start = 0;
+  var attemptedCount = Number(attempted || 0);
+  if (!isFinite(attemptedCount) || attemptedCount < 0) attemptedCount = 0;
+  var total = Number(totalAvailable || 0);
+  if (!isFinite(total) || total < 0) total = 0;
+  var next = start + attemptedCount;
+
+  return {
+    module: String(moduleName || "").trim(),
+    total_available: total,
+    start_index: start,
+    attempted: attemptedCount,
+    ok: 0,
+    failed: 0,
+    skipped: 0,
+    next_start: next < total ? next : null,
+    errors: []
+  };
+}
+
+function backfillSyncRows_(moduleName, rows, idGetter, syncFn, startIndex, limit) {
+  backfillAssertSupabaseReady_();
+
+  var allRows = Array.isArray(rows) ? rows : [];
+  var batch = backfillSliceRows_(allRows, startIndex, limit);
+  var result = backfillBuildResult_(moduleName, allRows.length, startIndex, batch.length);
+
+  for (var i = 0; i < batch.length; i++) {
+    var row = batch[i];
+    var id = "";
+    try {
+      id = String(idGetter ? idGetter(row) : "").trim();
+    } catch (eId) {
+      id = "";
+    }
+
+    try {
+      var syncRes = syncFn(row);
+      if (syncRes && syncRes.success) {
+        result.ok++;
+      } else if (syncRes && syncRes.skipped) {
+        result.skipped++;
+      } else {
+        result.failed++;
+        if (result.errors.length < 25) {
+          result.errors.push({
+            id: id || ("row_" + (Number(result.start_index) + i + 1)),
+            message: String((syncRes && syncRes.message) || "No se pudo sincronizar.")
+          });
+        }
+      }
+    } catch (eSync) {
+      result.failed++;
+      if (result.errors.length < 25) {
+        result.errors.push({
+          id: id || ("row_" + (Number(result.start_index) + i + 1)),
+          message: eSync.toString()
+        });
+      }
+    }
+  }
+
+  Logger.log("[BACKFILL] " + JSON.stringify(result));
+  return result;
+}
+
+function backfillReadSuperadmins_() {
+  var sheet = getSuperadminSheet_({ ensureSeed: true });
+  return backfillReadSheetRowsFromSheet_(sheet).map(function(row) {
+    row.usuario = normalizeTextLower_(row.usuario);
+    row.correo = normalizeTextLower_(row.correo);
+    return row;
+  });
+}
+
+function backfillReadDiagnoses_() {
+  var rows = backfillReadSheetRows_("diagnosticos_archivos");
+  return rows.map(function(row) {
+    var out = row || {};
+    if (!out.pdf_url && out.pdf_link) out.pdf_url = out.pdf_link;
+    if (!out.creado_por) {
+      try {
+        var parsed = JSON.parse(out.datos_json || "{}");
+        out.creado_por = String(parsed.creado_por || parsed.doctor_usuario || "").trim();
+      } catch (e) {}
+    }
+    if (!out.creado_por) out.creado_por = "doctor";
+    return out;
+  });
+}
+
+function backfillReadPromotions_() {
+  var ensured = ensurePromotionSheet_();
+  var sheet = ensured && ensured.sheet ? ensured.sheet : null;
+  var headers = ensured && ensured.headers ? ensured.headers : [];
+  var raw = sheet ? sheet.getDataRange().getValues() : [];
+  var out = [];
+
+  for (var i = 1; i < raw.length; i++) {
+    var mapped = mapPromotionRow_(headers, raw[i], i + 1);
+    if (mapped) out.push(mapped);
+  }
+  return out;
+}
+
+function backfillReadDoctorVacations_() {
+  var ensured = ensureDoctorVacationSheet_();
+  return backfillReadSheetRowsFromSheet_(ensured && ensured.sheet ? ensured.sheet : null);
+}
+
+function backfillReadInfographics_() {
+  try {
+    return readAllInfographicPosts_() || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function backfillReadServiceBundles_() {
+  var servicesEnsured = ensureServicesSheetHeaders_();
+  var configEnsured = ensureServiceConfigSheetHeaders_();
+  var serviceRows = backfillReadSheetRowsFromSheet_(servicesEnsured.sheet);
+  var configRows = backfillReadSheetRowsFromSheet_(configEnsured.sheet);
+  var fieldsByService = {};
+
+  configRows.forEach(function(row) {
+    var serviceKey = String(row.servicio || "").trim().toLowerCase();
+    if (!serviceKey) return;
+    if (!fieldsByService[serviceKey]) fieldsByService[serviceKey] = [];
+    fieldsByService[serviceKey].push({
+      nombre: String(row.campo_nombre || row.nombre || "").trim(),
+      etiqueta: String(row.campo_etiqueta || row.etiqueta || "").trim(),
+      tipo: String(row.campo_tipo || row.tipo || "").trim().toLowerCase(),
+      opciones: String(row.opciones || "").trim()
+    });
+  });
+
+  return serviceRows
+    .filter(function(serviceRow) {
+      return !!String(serviceRow.nombre_servicio || "").trim();
+    })
+    .map(function(serviceRow) {
+      var serviceNameKey = String(serviceRow.nombre_servicio || "").trim().toLowerCase();
+      return {
+        service: serviceRow,
+        fields: fieldsByService[serviceNameKey] || []
+      };
+    });
+}
+
+function backfillPreviewToSupabase_() {
+  var preview = {
+    generated_at: new Date().toISOString(),
+    supabase_ready: backfillIsSupabaseReady_(),
+    modules: {
+      usuarios_admin: backfillReadSheetRows_("usuarios_admin").length,
+      usuarios_superadmin: backfillReadSuperadmins_().length,
+      pacientes: backfillReadSheetRows_("pacientes").length,
+      citas: backfillReadSheetRows_("citas").length,
+      historia_clinica: backfillReadSheetRows_("historia_clinica").length,
+      evolucion_paciente: backfillReadSheetRows_("evolucion_paciente").length,
+      diagnosticos_archivos: backfillReadDiagnoses_().length,
+      config_promociones: backfillReadPromotions_().length,
+      config_vacaciones: backfillReadDoctorVacations_().length,
+      config_infografias: backfillReadInfographics_().length,
+      servicios: backfillReadServiceBundles_().length
+    }
+  };
+  Logger.log(JSON.stringify(preview, null, 2));
+  return preview;
+}
+
+function backfillAdminsToSupabase_(startIndex, limit) {
+  return backfillSyncRows_(
+    "usuarios_admin",
+    backfillReadSheetRows_("usuarios_admin"),
+    function(row) { return row.usuario; },
+    function(row) { return syncAdminUserToSupabase_(row); },
+    startIndex,
+    limit
+  );
+}
+
+function backfillSuperadminsToSupabase_(startIndex, limit) {
+  return backfillSyncRows_(
+    "usuarios_superadmin",
+    backfillReadSuperadmins_(),
+    function(row) { return row.usuario; },
+    function(row) { return syncSuperadminUserToSupabase_(row); },
+    startIndex,
+    limit
+  );
+}
+
+function backfillPatientsToSupabase_(startIndex, limit) {
+  return backfillSyncRows_(
+    "pacientes",
+    backfillReadSheetRows_("pacientes"),
+    function(row) { return row.id_paciente; },
+    function(row) { return syncPatientToSupabase_(row); },
+    startIndex,
+    limit
+  );
+}
+
+function backfillAppointmentsToSupabase_(startIndex, limit) {
+  return backfillSyncRows_(
+    "citas",
+    backfillReadSheetRows_("citas"),
+    function(row) { return row.id_cita; },
+    function(row) { return syncAppointmentToSupabase_(row); },
+    startIndex,
+    limit
+  );
+}
+
+function backfillClinicalHistoryToSupabase_(startIndex, limit) {
+  return backfillSyncRows_(
+    "historia_clinica",
+    backfillReadSheetRows_("historia_clinica"),
+    function(row) { return row.id_paciente; },
+    function(row) { return syncClinicalHistoryToSupabase_(row); },
+    startIndex,
+    limit
+  );
+}
+
+function backfillPatientEvolutionToSupabase_(startIndex, limit) {
+  return backfillSyncRows_(
+    "evolucion_paciente",
+    backfillReadSheetRows_("evolucion_paciente"),
+    function(row) { return row.id_evolucion; },
+    function(row) { return syncPatientEvolutionToSupabase_(row); },
+    startIndex,
+    limit
+  );
+}
+
+function backfillDiagnosesToSupabase_(startIndex, limit) {
+  return backfillSyncRows_(
+    "diagnosticos_archivos",
+    backfillReadDiagnoses_(),
+    function(row) { return row.id_reporte; },
+    function(row) { return syncDiagnosisToSupabase_(row); },
+    startIndex,
+    limit
+  );
+}
+
+function backfillPromotionsToSupabase_(startIndex, limit) {
+  return backfillSyncRows_(
+    "config_promociones",
+    backfillReadPromotions_(),
+    function(row) { return row.id; },
+    function(row) { return syncPromotionToSupabase_(row); },
+    startIndex,
+    limit
+  );
+}
+
+function backfillDoctorVacationsToSupabase_(startIndex, limit) {
+  return backfillSyncRows_(
+    "config_vacaciones",
+    backfillReadDoctorVacations_(),
+    function(row) { return row.doctor_usuario; },
+    function(row) { return syncDoctorVacationToSupabase_(row); },
+    startIndex,
+    limit
+  );
+}
+
+function backfillInfographicsToSupabase_(startIndex, limit) {
+  return backfillSyncRows_(
+    "config_infografias",
+    backfillReadInfographics_(),
+    function(row) { return row.id_post; },
+    function(row) { return syncInfographicPostToSupabase_(row); },
+    startIndex,
+    limit
+  );
+}
+
+function backfillServicesToSupabase_(startIndex, limit) {
+  return backfillSyncRows_(
+    "servicios",
+    backfillReadServiceBundles_(),
+    function(bundle) {
+      return (bundle && bundle.service && (bundle.service.id || bundle.service.nombre_servicio)) || "";
+    },
+    function(bundle) {
+      var serviceRow = bundle && bundle.service ? bundle.service : {};
+      var fields = bundle && Array.isArray(bundle.fields) ? bundle.fields : [];
+      return syncServiceFullToSupabase_(serviceRow, fields, [serviceRow.nombre_servicio]);
+    },
+    startIndex,
+    limit
+  );
+}
+
+function backfillRunModules_(moduleFns) {
+  backfillAssertSupabaseReady_();
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var results = [];
+    var list = Array.isArray(moduleFns) ? moduleFns : [];
+    for (var i = 0; i < list.length; i++) {
+      results.push(list[i]());
+    }
+    var summary = {
+      generated_at: new Date().toISOString(),
+      success: results.every(function(item) { return !item.failed; }),
+      results: results
+    };
+    Logger.log(JSON.stringify(summary, null, 2));
+    return summary;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function backfillCoreDataToSupabase_() {
+  return backfillRunModules_([
+    function() { return backfillAdminsToSupabase_(); },
+    function() { return backfillSuperadminsToSupabase_(); },
+    function() { return backfillPatientsToSupabase_(); },
+    function() { return backfillAppointmentsToSupabase_(); },
+    function() { return backfillClinicalHistoryToSupabase_(); },
+    function() { return backfillPatientEvolutionToSupabase_(); },
+    function() { return backfillDiagnosesToSupabase_(); }
+  ]);
+}
+
+function backfillSupportDataToSupabase_() {
+  return backfillRunModules_([
+    function() { return backfillPromotionsToSupabase_(); },
+    function() { return backfillDoctorVacationsToSupabase_(); },
+    function() { return backfillInfographicsToSupabase_(); },
+    function() { return backfillServicesToSupabase_(); }
+  ]);
+}
+
+function backfillEverythingToSupabase_() {
+  return backfillRunModules_([
+    function() { return backfillAdminsToSupabase_(); },
+    function() { return backfillSuperadminsToSupabase_(); },
+    function() { return backfillPatientsToSupabase_(); },
+    function() { return backfillAppointmentsToSupabase_(); },
+    function() { return backfillClinicalHistoryToSupabase_(); },
+    function() { return backfillPatientEvolutionToSupabase_(); },
+    function() { return backfillDiagnosesToSupabase_(); },
+    function() { return backfillPromotionsToSupabase_(); },
+    function() { return backfillDoctorVacationsToSupabase_(); },
+    function() { return backfillInfographicsToSupabase_(); },
+    function() { return backfillServicesToSupabase_(); }
+  ]);
+}
+
+// Compatibilidad con el selector viejo de Apps Script.
+// Si la interfaz recuerda "myFunction", esto ejecuta el preview.
+function myFunction() {
+  return backfillPreviewToSupabase_();
+}
+
+// Atajos con nombres simples por si el menu tarda en refrescar.
+function runBackfillPreview_() {
+  return backfillPreviewToSupabase_();
+}
+
+function runBackfillPreview() {
+  return backfillPreviewToSupabase_();
+}
+
+function runBackfillCore_() {
+  return backfillCoreDataToSupabase_();
+}
+
+function runBackfillCore() {
+  return backfillCoreDataToSupabase_();
+}
+
+function runBackfillSupport_() {
+  return backfillSupportDataToSupabase_();
+}
+
+function runBackfillSupport() {
+  return backfillSupportDataToSupabase_();
+}
+
+function runBackfillEverything_() {
+  return backfillEverythingToSupabase_();
+}
+
+function runBackfillEverything() {
+  return backfillEverythingToSupabase_();
+}
+
+function runBackfillPatients() {
+  return backfillPatientsToSupabase_();
+}
+
+function runBackfillClinicalHistory() {
+  return backfillClinicalHistoryToSupabase_();
+}

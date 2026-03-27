@@ -1,0 +1,3388 @@
+// ==========================================
+// API.gs - CONTROLADOR PRINCIPAL (CORREGIDO Y BLINDADO)
+// ==========================================
+
+function doGet(e) {
+  const action = String((e && e.parameter && e.parameter.action) || "").trim().toLowerCase();
+  const payload = {
+    success: true,
+    method: "GET",
+    service: "VIDAFEM Apps Script API",
+    message: "API activa. Usa POST para ejecutar acciones."
+  };
+
+  if (action === "ping" || action === "health") {
+    payload.generated_at = new Date().toISOString();
+    payload.supabase_ready = (typeof backfillIsSupabaseReady_ === "function")
+      ? backfillIsSupabaseReady_()
+      : null;
+  }
+
+  return ContentService
+    .createTextOutput(JSON.stringify(payload))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
+  let lock = null;
+  let lockAcquired = false;
+
+  try {
+    const requestStartMs = Date.now();
+    // 2. Leer los datos que vienen de la página web
+    // IMPORTANTE: Usamos 'data' para que coincida con todas las funciones nuevas
+    const data = JSON.parse((e && e.postData && e.postData.contents) ? e.postData.contents : "{}");
+    const action = data.action;
+    let response = {};
+
+    if (action !== "login") {
+      const session = resolveSessionContext_(data.session_token);
+      const needsSession = requiresSessionToken_(action);
+      if (needsSession && !session.ok) {
+        return ContentService.createTextOutput(JSON.stringify({ success: false, message: "Sesion invalida o expirada." }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+      if (session.ok) {
+        if (needsSession && !isSessionRoleAllowedForAction_(action, session.role)) {
+          return ContentService.createTextOutput(JSON.stringify({ success: false, message: "Acceso denegado." }))
+            .setMimeType(ContentService.MimeType.JSON);
+        }
+        if (!data.requester) {
+          data.requester = session.user_id;
+        } else if (!requesterMatchesSession_(data.requester, session)) {
+          return ContentService.createTextOutput(JSON.stringify({ success: false, message: "Acceso denegado." }))
+            .setMimeType(ContentService.MimeType.JSON);
+        }
+      } else if (data.session_token) {
+        return ContentService.createTextOutput(JSON.stringify({ success: false, message: "Sesion invalida o expirada." }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+
+    // Solo bloqueamos acciones de escritura para evitar esperas innecesarias en login/lecturas.
+    if (requiresGlobalLock_(action)) {
+      lock = LockService.getScriptLock();
+      try {
+        lock.waitLock(10000);
+        lockAcquired = true;
+      } catch (errLock) {
+        return ContentService.createTextOutput(JSON.stringify({ success: false, message: "Servidor ocupado, intente de nuevo." }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+
+    switch (action) {
+
+      // ==========================================
+      // 1. AUTENTICACIÓN (LOGIN)
+      // ==========================================
+      case "login":
+        const loginUser = String(data.usuario || "").trim();
+        const loginUserLower = normalizeTextLower_(loginUser);
+        const loginCedula = normalizeDigits_(loginUser);
+        const loginLooksNumeric = !!loginUser && /^\d+$/.test(loginUser);
+        const loginCanBeCedula = loginCedula.length >= 8;
+        const pacienteCandidate = loginCanBeCedula ? findPatientByCedulaForLogin_(loginCedula) : null;
+
+        // Atajo: si parece cedula, intentamos primero paciente para recortar latencia.
+        if (loginLooksNumeric && pacienteCandidate && verifyPassword_(data.password, pacienteCandidate.password)) {
+          const mustChangePac = hasOwnKey_(pacienteCandidate, "first_login")
+            ? String(pacienteCandidate.first_login || "").toUpperCase() === "SI"
+            : getFirstLoginValue_("pacientes", "id_paciente", pacienteCandidate.id_paciente);
+          const sessionPac = issueSessionToken_("paciente", pacienteCandidate.id_paciente);
+          response = {
+            success: true,
+            role: 'paciente',
+            data: sanitizeUserData_(pacienteCandidate),
+            must_change_password: mustChangePac,
+            first_login_role: "paciente",
+            first_login_id: pacienteCandidate.id_paciente,
+            session_token: sessionPac.token,
+            session_expires_at: sessionPac.expires_at
+          };
+          break;
+        }
+
+        // SUPERADMIN
+        const superadmin = findSuperadminForLogin_(loginUserLower);
+        if (superadmin && verifyPassword_(data.password, superadmin.password)) {
+          const session = issueSessionToken_("superadmin", superadmin.usuario);
+          response = { success: true, role: 'superadmin', data: sanitizeUserData_(superadmin), session_token: session.token, session_expires_at: session.expires_at };
+          break;
+        }
+
+        // A. Buscamos si es DOCTOR
+        const admin = findAdminByUserForLogin_(loginUserLower);
+        if (admin && verifyPassword_(data.password, admin.password)) {
+          const mustChange = hasOwnKey_(admin, "first_login")
+            ? String(admin.first_login || "").toUpperCase() === "SI"
+            : getFirstLoginValue_("usuarios_admin", "usuario", admin.usuario);
+          const session = issueSessionToken_("admin", admin.usuario);
+          response = {
+            success: true,
+            role: 'admin',
+            data: sanitizeUserData_(admin),
+            must_change_password: mustChange,
+            first_login_role: "admin",
+            first_login_id: admin.usuario,
+            session_token: session.token,
+            session_expires_at: session.expires_at
+          };
+          break;
+        }
+
+        // B. Si no entro como admin/superadmin, validamos el candidato paciente (ya consultado una sola vez).
+        if (pacienteCandidate && verifyPassword_(data.password, pacienteCandidate.password)) {
+          const mustChange = hasOwnKey_(pacienteCandidate, "first_login")
+            ? String(pacienteCandidate.first_login || "").toUpperCase() === "SI"
+            : getFirstLoginValue_("pacientes", "id_paciente", pacienteCandidate.id_paciente);
+          const session = issueSessionToken_("paciente", pacienteCandidate.id_paciente);
+          response = {
+            success: true,
+            role: 'paciente',
+            data: sanitizeUserData_(pacienteCandidate),
+            must_change_password: mustChange,
+            first_login_role: "paciente",
+            first_login_id: pacienteCandidate.id_paciente,
+            session_token: session.token,
+            session_expires_at: session.expires_at
+          };
+          break;
+        }
+        // C. Fallo
+        response = { success: false, message: "Usuario o contraseña incorrectos" };
+        break;
+
+
+      // ==========================================
+      // 2. GESTIÓN DE DATOS (CRUD BÁSICO)
+      // ==========================================
+      case "get_data":
+        const sheetName = data.sheet || "pacientes";
+        if (sheetName === "usuarios_superadmin" || sheetName === "usuarios_admin") {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        const sheet = getConnection().getSheetByName(sheetName);
+        if (!sheet) {
+          response = { success: false, message: "Hoja no encontrada: " + sheetName };
+        } else {
+          // Si se pide la hoja 'pacientes' requerimos requester para filtrar por creado_por
+          if (sheetName === 'pacientes') {
+            const requester = data.requester;
+            if (!requester) {
+              response = { success: false, message: 'Acceso denegado: requester faltante' };
+            } else {
+              const rawData = sheet.getDataRange().getValues();
+              const headers = rawData.shift();
+              let json = rawData.map(row => {
+                let obj = {};
+                headers.forEach((h, i) => obj[h] = row[i]);
+                return obj;
+              });
+              // Filtrar solo pacientes creados por el requester
+              json = json.filter(p =>
+                normalizeTextLower_(p.creado_por || p['creado_por'] || '') === normalizeTextLower_(requester)
+              );
+              response = { success: true, data: json.reverse() };
+            }
+          } else if (sheetName === 'diagnosticos_archivos') {
+            const requester = normalizeTextLower_(data.requester);
+            if (!requester) {
+              response = { success: false, message: 'Acceso denegado: requester faltante' };
+            } else {
+              const rawData = sheet.getDataRange().getValues();
+              const headers = rawData.shift();
+              let json = rawData.map(row => {
+                let obj = {};
+                headers.forEach((h, i) => obj[h] = row[i]);
+                return obj;
+              });
+              const owners = buildPatientOwnerMap_();
+              json = json.filter(rep => canRequesterSeePatient_(requester, rep.id_paciente, owners));
+              response = { success: true, data: json.reverse() };
+            }
+          } else {
+            const rawData = sheet.getDataRange().getValues();
+            const headers = rawData.shift();
+            const json = rawData.map(row => {
+              let obj = {};
+              headers.forEach((h, i) => obj[h] = row[i]);
+              return obj;
+            });
+            response = { success: true, data: json.reverse() };
+          }
+        }
+        break;
+
+      case "create_record":
+        // Protección: si se crea un paciente, forzar creado_por desde requester
+        if (data.sheet === 'pacientes') {
+          ensureFirstLoginColumn_("pacientes");
+          const requester = data.requester;
+          if (!requester) {
+            response = { success: false, message: 'Acceso denegado: requester faltante' };
+            break;
+          }
+          if (!data.data) data.data = {};
+          if (!data.data.creado_por) data.data.creado_por = requester;
+          data.data = normalizePayloadForSheet_(data.sheet, data.data);
+          data.data = preparePasswordForSheet_(data.sheet, data.data);
+          if (data.data.first_login === undefined || data.data.first_login === null || data.data.first_login === "") {
+            data.data.first_login = "SI";
+          }
+          response = createRecord(data.sheet, data.data);
+        } else {
+          response = createRecord(
+            data.sheet,
+            preparePasswordForSheet_(data.sheet, normalizePayloadForSheet_(data.sheet, data.data || {}))
+          );
+        }
+        break;
+
+      case "update_record":
+        // Protección: si se actualiza un paciente, verificar que requester sea propietario
+        if (data.sheet === 'pacientes') {
+          const requester = data.requester;
+          if (!requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+          const owner = findRow('pacientes', 'id_paciente', data.id);
+          if (!owner || String(owner.creado_por || '') !== String(requester)) { response = { success: false, message: 'Acceso denegado' }; break; }
+          response = updateRecord(data.sheet, data.id, normalizePayloadForSheet_(data.sheet, data.data || {}));
+        } else {
+          response = updateRecord(data.sheet, data.id, normalizePayloadForSheet_(data.sheet, data.data || {}));
+        }
+        break;
+
+      case "delete_record":
+        // Protección: si se borra un paciente validar propietario
+        if (data.sheet === 'pacientes') {
+          const requester = data.requester;
+          if (!requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+          const owner = findRow('pacientes', 'id_paciente', data.id);
+          if (!owner || String(owner.creado_por || '') !== String(requester)) { response = { success: false, message: 'Acceso denegado' }; break; }
+          response = deleteRecord(data.sheet, data.id);
+        } else {
+          response = deleteRecord(data.sheet, data.id);
+        }
+        break;
+
+
+      // ==========================================
+      // 3. MÓDULO DE SERVICIOS (MODULARIDAD)
+      // ==========================================
+
+      // ESTE ES VITAL: Lee la configuración para el Editor Visual
+      case "get_service_config":
+        // Usamos la función auxiliar definida al final de este archivo
+        if (!data.requester) {
+          response = { success: false, message: "Acceso denegado: requester faltante" };
+        } else {
+          response = { success: true, data: getServiceConfigMap(data.requester) };
+        }
+        break;
+
+      // Para listas desplegables simples
+      case "get_services":
+        // Reutilizamos la config para sacar solo los nombres
+        if (!data.requester) {
+          response = { success: false, message: "Acceso denegado: requester faltante" };
+        } else {
+          response = { success: true, data: getServices(data.requester) };
+        }
+        break;
+
+      // --- FUNCIONES MAESTRAS NUEVAS (CORREGIDAS) ---
+      case "save_service_full":
+        // Seguridad: solo medicos/superadmin pueden crear o editar, y solo propietario puede editar.
+        const serviceRequester = normalizeTextLower_(data.requester);
+        if (!serviceRequester) {
+          response = { success: false, message: "Acceso denegado: requester faltante" };
+          break;
+        }
+        if (!isSuperadminUser(serviceRequester) && !isAdminUser_(serviceRequester)) {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        const servicePayload = data.data || {};
+        const serviceNameToEdit = String(servicePayload.originalName || servicePayload.nombre_servicio || "").trim();
+        if (!canRequesterManageService_(serviceRequester, serviceNameToEdit)) {
+          response = { success: false, message: "Solo el medico creador puede modificar este servicio." };
+          break;
+        }
+        response = saveServiceFull(servicePayload, serviceRequester);
+        break;
+
+      case "delete_service_full":
+        // Solo propietario o superadmin pueden eliminar.
+        const delRequester = normalizeTextLower_(data.requester);
+        const delServiceName = String(data.nombre || "").trim();
+        if (!delRequester || !delServiceName) {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        if (!canRequesterManageService_(delRequester, delServiceName)) {
+          response = { success: false, message: "Solo el medico creador puede eliminar este servicio." };
+          break;
+        }
+        response = deleteServiceFull(delServiceName, delRequester);
+        break;
+
+      // Casos antiguos (compatibilidad)
+      case "add_service":
+        response = addService(data.data);
+        break;
+
+      case "update_service":
+        response = updateService(data.data);
+        break;
+
+      case "delete_service":
+        response = deleteService(data.id);
+        break;
+
+
+      // ==========================================
+      // 4. DIAGNÓSTICOS Y EXPEDIENTES
+      // ==========================================
+
+      case "save_diagnosis_advanced":
+        // Verificar permisos: requester debe ser doctor creador del paciente o el propio paciente
+        if (!data.requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const pidDiag = data.data && data.data.id_paciente;
+        if (!pidDiag) { response = { success: false, message: 'Falta id_paciente' }; break; }
+        const ownerRow = findRow('pacientes', 'id_paciente', pidDiag);
+        if (!ownerRow || (String(ownerRow.creado_por || '') !== String(data.requester) && String(pidDiag) !== String(data.requester))) { response = { success: false, message: 'Acceso denegado' }; break; }
+        if (!data.data) data.data = {};
+        data.data.doctor_usuario = normalizeTextLower_(ownerRow.creado_por || data.requester);
+        // La función BLINDADA que guarda carpetas y PDFs externos correctamente
+        response = saveDiagnosisAdvanced(data.data);
+        break;
+
+      case "get_diagnosis_history":
+        // Busca historial específico de un paciente (usado en clinical.js)
+        // Verificar requester
+        if (!data.requester) {
+          response = { success: false, message: 'Acceso denegado: requester faltante' };
+        } else {
+          // Verificar propietario del paciente
+          const owner = findRow('pacientes', 'id_paciente', data.id_paciente);
+          if (!owner || (String(owner.creado_por || '') !== String(data.requester) && String(owner.id_paciente || '') !== String(data.requester))) {
+            response = { success: false, message: 'Acceso denegado' };
+          } else {
+            response = getHistoryByPatient(data.id_paciente);
+          }
+        }
+        break;
+
+      // Mantenemos este por compatibilidad
+      case "get_diagnoses":
+        response = getHistoryByPatient(data.id_paciente);
+        break;
+
+      case "delete_diagnosis":
+        // Borra reporte, archivos y filas (solo si requester es propietario doctor o paciente)
+        if (!data.requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const repSheet = getConnection().getSheetByName('diagnosticos_archivos');
+        const repData = repSheet.getDataRange().getValues();
+        let found = false; let repRow = null;
+        for (let i = 1; i < repData.length; i++) {
+          if (String(repData[i][0]) === String(data.id_reporte)) { found = true; repRow = repData[i]; break; }
+        }
+        if (!found) { response = { success: false, message: 'Reporte no encontrado' }; break; }
+        const repPatient = repRow[1];
+        const ownerRep = findRow('pacientes', 'id_paciente', repPatient);
+        if (!ownerRep || (String(ownerRep.creado_por || '') !== String(data.requester) && String(repPatient) !== String(data.requester))) { response = { success: false, message: 'Acceso denegado' }; break; }
+        response = deleteDiagnosisAndFiles(data.id_reporte);
+        break;
+
+      case "delete_diagnosis_asset":
+        if (!data.requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const assetSheet = getConnection().getSheetByName('diagnosticos_archivos');
+        if (!assetSheet) { response = { success: false, message: 'No existe la hoja de diagnosticos.' }; break; }
+        const assetData = assetSheet.getDataRange().getValues();
+        let assetFound = false; let assetRow = null;
+        for (let i = 1; i < assetData.length; i++) {
+          if (String(assetData[i][0] || '').trim() === String(data.id_reporte || '').trim()) { assetFound = true; assetRow = assetData[i]; break; }
+        }
+        if (!assetFound || !assetRow) { response = { success: false, message: 'Reporte no encontrado' }; break; }
+        const assetPatient = String(assetRow[1] || '').trim();
+        const assetOwner = findRow('pacientes', 'id_paciente', assetPatient);
+        const assetRequester = String(data.requester || '').trim();
+        const assetIsSuper = (typeof isSuperadminUser === 'function') ? isSuperadminUser(assetRequester) : false;
+        if (!assetOwner || (!assetIsSuper && String(assetOwner.creado_por || '') !== assetRequester)) {
+          response = { success: false, message: 'Acceso denegado' };
+          break;
+        }
+        response = deleteDiagnosisAsset(data.id_reporte, data.asset_type, data.asset_id);
+        break;
+
+      case "delete_bulk_diagnosis":
+        if (!data.requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const diagBulkIds = Array.isArray(data.ids) ? data.ids : [];
+        const diagBulkPatientId = String(data.id_paciente || "").trim();
+        if (!diagBulkPatientId) { response = { success: false, message: 'Falta id_paciente' }; break; }
+        if (!diagBulkIds.length) { response = { success: false, message: 'No se recibieron diagnosticos para eliminar.' }; break; }
+        const diagBulkOwner = findRow('pacientes', 'id_paciente', diagBulkPatientId);
+        if (!diagBulkOwner || (String(diagBulkOwner.creado_por || '') !== String(data.requester) && String(diagBulkPatientId) !== String(data.requester))) {
+          response = { success: false, message: 'Acceso denegado' };
+          break;
+        }
+        const diagBulkSheet = getConnection().getSheetByName('diagnosticos_archivos');
+        if (!diagBulkSheet) { response = { success: false, message: 'No existe la hoja de diagnosticos.' }; break; }
+        const diagBulkData = diagBulkSheet.getDataRange().getValues();
+        const diagBulkMap = {};
+        diagBulkIds.forEach(function(id) { diagBulkMap[String(id || '').trim()] = true; });
+        let diagBulkMatches = 0;
+        let diagBulkInvalidPatient = false;
+        for (let i = 1; i < diagBulkData.length; i++) {
+          const rowId = String(diagBulkData[i][0] || '').trim();
+          if (!diagBulkMap[rowId]) continue;
+          const rowPatientId = String(diagBulkData[i][1] || '').trim();
+          if (rowPatientId !== diagBulkPatientId) {
+            diagBulkInvalidPatient = true;
+            break;
+          }
+          diagBulkMatches++;
+        }
+        if (diagBulkInvalidPatient) { response = { success: false, message: 'Uno o mas diagnosticos no pertenecen a este paciente.' }; break; }
+        if (!diagBulkMatches) { response = { success: false, message: 'No se encontraron diagnosticos para eliminar.' }; break; }
+        response = deleteDiagnosesBulk(diagBulkIds);
+        break;
+
+      case "add_diagnosis": // Compatibilidad antigua
+        response = saveDiagnosisAdvanced(data.data);
+        break;
+
+
+      // ==========================================
+      // 5. HISTORIA CLÍNICA (Antecedentes)
+      // ==========================================
+      case "get_history":
+        // Esta es para antecedentes (G/P/C/A), no confundir con diagnósticos
+        if (!data.requester) {
+          response = { success: false, message: 'Acceso denegado: requester faltante' };
+        } else {
+          const ownerH = findRow('pacientes', 'id_paciente', data.id_paciente);
+          if (!ownerH || (String(ownerH.creado_por || '') !== String(data.requester) && String(ownerH.id_paciente || '') !== String(data.requester))) {
+            response = { success: false, message: 'Acceso denegado' };
+          } else {
+            response = { success: true, data: getClinicalHistory(data.id_paciente) };
+          }
+        }
+        break;
+
+      case "save_history":
+        // Validar requester: solo doctor propietario puede guardar la historia clínica
+        if (!data.requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const hid = data.data && data.data.id_paciente;
+        if (!hid) { response = { success: false, message: 'Falta id_paciente' }; break; }
+        const ownerH = findRow('pacientes', 'id_paciente', hid);
+        if (!ownerH || String(ownerH.creado_por || '') !== String(data.requester)) { response = { success: false, message: 'Acceso denegado' }; break; }
+        response = saveClinicalHistory(data.data);
+        break;
+
+
+      // ==========================================
+      // 5B. EVOLUCION DEL PACIENTE (BITACORA MEDICA)
+      // ==========================================
+      case "get_patient_evolution":
+        if (!data.requester) {
+          response = { success: false, message: 'Acceso denegado: requester faltante' };
+          break;
+        }
+        const evoPatientId = String(data.id_paciente || "").trim();
+        if (!evoPatientId) {
+          response = { success: false, message: 'Falta id_paciente' };
+          break;
+        }
+        const evoOwner = findRow('pacientes', 'id_paciente', evoPatientId);
+        if (!evoOwner || normalizeTextLower_(evoOwner.creado_por || '') !== normalizeTextLower_(data.requester)) {
+          response = { success: false, message: 'Acceso denegado' };
+          break;
+        }
+        response = { success: true, data: getPatientEvolutionEntries(evoPatientId) };
+        break;
+
+      case "save_patient_evolution":
+        if (!data.requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const evoPayload = data.data || {};
+        const evoEditId = String(evoPayload.id_evolucion || "").trim();
+        let evoSavePatientId = String(evoPayload.id_paciente || "").trim();
+        if (evoEditId) {
+          const evoExistingRows = ensurePatientEvolutionSheet_().sheet.getDataRange().getValues();
+          let evoExistingPatientId = "";
+          for (let i = 1; i < evoExistingRows.length; i++) {
+            if (String(evoExistingRows[i][0] || "").trim() === evoEditId) {
+              evoExistingPatientId = String(evoExistingRows[i][1] || "").trim();
+              break;
+            }
+          }
+          if (!evoExistingPatientId) { response = { success: false, message: 'La evolucion que intentas editar no existe.' }; break; }
+          evoSavePatientId = evoExistingPatientId;
+          evoPayload.id_paciente = evoExistingPatientId;
+        }
+        if (!evoSavePatientId) { response = { success: false, message: 'Falta id_paciente' }; break; }
+        const evoSaveOwner = findRow('pacientes', 'id_paciente', evoSavePatientId);
+        if (!evoSaveOwner || normalizeTextLower_(evoSaveOwner.creado_por || '') !== normalizeTextLower_(data.requester)) {
+          response = { success: false, message: 'Acceso denegado' };
+          break;
+        }
+        response = savePatientEvolutionEntry(evoPayload, data.requester);
+        break;
+
+      case "delete_patient_evolution":
+        if (!data.requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const delEvolutionId = String(data.id_evolucion || "").trim();
+        if (!delEvolutionId) { response = { success: false, message: 'Falta id_evolucion' }; break; }
+        const evoSheetData = ensurePatientEvolutionSheet_().sheet.getDataRange().getValues();
+        let evoPatientRef = "";
+        for (let i = 1; i < evoSheetData.length; i++) {
+          if (String(evoSheetData[i][0] || "").trim() === delEvolutionId) {
+            evoPatientRef = String(evoSheetData[i][1] || "").trim();
+            break;
+          }
+        }
+        if (!evoPatientRef) { response = { success: false, message: 'Evolucion no encontrada' }; break; }
+        const evoDeleteOwner = findRow('pacientes', 'id_paciente', evoPatientRef);
+        if (!evoDeleteOwner || normalizeTextLower_(evoDeleteOwner.creado_por || '') !== normalizeTextLower_(data.requester)) {
+          response = { success: false, message: 'Acceso denegado' };
+          break;
+        }
+        response = deletePatientEvolutionEntry(delEvolutionId);
+        break;
+
+      case "delete_bulk_patient_evolution":
+        if (!data.requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const evoBulkIds = Array.isArray(data.ids) ? data.ids : [];
+        const evoBulkPatientId = String(data.id_paciente || "").trim();
+        if (!evoBulkPatientId) { response = { success: false, message: 'Falta id_paciente' }; break; }
+        if (!evoBulkIds.length) { response = { success: false, message: 'No se recibieron evoluciones para eliminar.' }; break; }
+        const evoBulkOwner = findRow('pacientes', 'id_paciente', evoBulkPatientId);
+        if (!evoBulkOwner || normalizeTextLower_(evoBulkOwner.creado_por || '') !== normalizeTextLower_(data.requester)) {
+          response = { success: false, message: 'Acceso denegado' };
+          break;
+        }
+        const evoBulkRows = ensurePatientEvolutionSheet_().sheet.getDataRange().getValues();
+        const evoBulkMap = {};
+        evoBulkIds.forEach(function(id) { evoBulkMap[String(id || '').trim()] = true; });
+        let evoBulkMatches = 0;
+        let evoBulkInvalidPatient = false;
+        for (let i = 1; i < evoBulkRows.length; i++) {
+          const rowId = String(evoBulkRows[i][0] || '').trim();
+          if (!evoBulkMap[rowId]) continue;
+          const rowPatientId = String(evoBulkRows[i][1] || '').trim();
+          if (rowPatientId !== evoBulkPatientId) {
+            evoBulkInvalidPatient = true;
+            break;
+          }
+          evoBulkMatches++;
+        }
+        if (evoBulkInvalidPatient) { response = { success: false, message: 'Una o mas evoluciones no pertenecen a este paciente.' }; break; }
+        if (!evoBulkMatches) { response = { success: false, message: 'No se encontraron evoluciones para eliminar.' }; break; }
+        response = deletePatientEvolutionEntriesBulk(evoBulkIds);
+        break;
+
+
+      // ==========================================
+      // 6. AGENDA Y CITAS
+      // ==========================================
+      case "get_agenda":
+        if (!data.requester) {
+          response = { success: false, message: 'Acceso denegado: requester faltante' };
+        } else {
+          const agendaRows = getAppointmentsByDate(data.fecha) || [];
+          const owners = buildPatientOwnerMap_();
+          const requester = normalizeTextLower_(data.requester);
+          response = { success: true, data: filterAppointmentsForRequester_(agendaRows, requester, owners) };
+        }
+        break;
+
+      case "get_patient_appointments":
+        // Validar requester
+        if (!data.requester) {
+          response = { success: false, message: 'Acceso denegado: requester faltante' };
+        } else {
+          const owner = findRow('pacientes', 'id_paciente', data.id_paciente);
+          if (!owner || (String(owner.creado_por || '') !== String(data.requester) && String(owner.id_paciente || '') !== String(data.requester))) {
+            response = { success: false, message: 'Acceso denegado' };
+          } else {
+            response = { success: true, data: getPatientAppointments(data.id_paciente) };
+          }
+        }
+        break;
+
+      case "schedule_appointment":
+        // Validar requester: permitir si requester es el paciente o el doctor propietario
+        const schedRequester = data.requester;
+        if (!schedRequester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const pid = data.data && data.data.id_paciente;
+        if (!pid) { response = { success: false, message: 'Falta id_paciente' }; break; }
+        const ownerRowSched = findRow('pacientes', 'id_paciente', pid);
+        if (!ownerRowSched) { response = { success: false, message: 'Paciente no encontrado' }; break; }
+        if (String(schedRequester) !== String(pid) && String(ownerRowSched.creado_por || '') !== String(schedRequester)) {
+          response = { success: false, message: 'Acceso denegado' };
+          break;
+        }
+        // Bloqueo por vacaciones: aplica cuando agenda el propio paciente.
+        if (String(schedRequester) === String(pid)) {
+          const vacationGate = getMyDoctorVacation_(pid);
+          if (vacationGate && vacationGate.success && vacationGate.active) {
+            response = {
+              success: false,
+              message: vacationGate.block_message || "Tu medico se encuentra de vacaciones y no acepta citas por el momento."
+            };
+            break;
+          }
+        }
+        response = scheduleAppointment(data.data);
+        break;
+
+      case "reschedule_appointment":
+        // Validar requester: quien solicita debe ser doctor propietario del paciente o el propio paciente
+        const resRequester = data.requester;
+        if (!resRequester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const citaId = data.data && data.data.id_cita;
+        if (!citaId) { response = { success: false, message: 'Falta id_cita' }; break; }
+        const citaRow = findRow('citas', 'id_cita', citaId);
+        if (!citaRow) { response = { success: false, message: 'Cita no encontrada' }; break; }
+        const citPatient = citaRow.id_paciente || citaRow[1];
+        const ownerRowResch = findRow('pacientes', 'id_paciente', citPatient);
+        if (!ownerRowResch) { response = { success: false, message: 'Paciente no encontrado' }; break; }
+        if (String(resRequester) !== String(citPatient) && String(ownerRowResch.creado_por || '') !== String(resRequester)) {
+          response = { success: false, message: 'Acceso denegado' };
+          break;
+        }
+        // Bloqueo por vacaciones: aplica cuando reagenda el propio paciente.
+        if (String(resRequester) === String(citPatient)) {
+          const vacationGateResch = getMyDoctorVacation_(citPatient);
+          if (vacationGateResch && vacationGateResch.success && vacationGateResch.active) {
+            response = {
+              success: false,
+              message: vacationGateResch.block_message || "Tu medico se encuentra de vacaciones y no acepta citas por el momento."
+            };
+            break;
+          }
+        }
+        response = rescheduleAppointment(data.data);
+        break;
+
+      case "update_appt_status":
+        // Validar requester: solo doctor propietario o paciente (según contexto) puede cambiar estado
+        if (!data.requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const citaRowStatus = findRow('citas', 'id_cita', data.id_cita);
+        if (!citaRowStatus) { response = { success: false, message: 'Cita no encontrada' }; break; }
+        const citaPaciente = citaRowStatus.id_paciente || citaRowStatus[1];
+        const ownerCita = findRow('pacientes', 'id_paciente', citaPaciente);
+        if (!ownerCita) { response = { success: false, message: 'Paciente no encontrado' }; break; }
+        if (String(data.requester) !== String(citaPaciente) && String(ownerCita.creado_por || '') !== String(data.requester)) { response = { success: false, message: 'Acceso denegado' }; break; }
+        response = updateAppointmentStatus(data.id_cita, data.estado);
+        break;
+
+      case "delete_cita":
+        // Validar requester: solo doctor propietario o el paciente puede borrar cita
+        if (!data.requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const citaRowDel = findRow('citas', 'id_cita', data.id_cita);
+        if (!citaRowDel) { response = { success: false, message: 'Cita no encontrada' }; break; }
+        const pidDel = citaRowDel.id_paciente || citaRowDel[1];
+        const ownerCitaDel = findRow('pacientes', 'id_paciente', pidDel);
+        if (!ownerCitaDel) { response = { success: false, message: 'Paciente no encontrado' }; break; }
+        if (String(data.requester) !== String(pidDel) && String(ownerCitaDel.creado_por || '') !== String(data.requester)) { response = { success: false, message: 'Acceso denegado' }; break; }
+        response = deleteAppointment(data.id_cita);
+        break;
+
+      case "delete_bulk_citas":
+        if (!data.requester) { response = { success: false, message: 'Acceso denegado: requester faltante' }; break; }
+        const bulkCitaIds = Array.isArray(data.ids) ? data.ids : [];
+        const bulkCitaPatientId = String(data.id_paciente || "").trim();
+        if (!bulkCitaPatientId) { response = { success: false, message: 'Falta id_paciente' }; break; }
+        if (!bulkCitaIds.length) { response = { success: false, message: 'No se recibieron citas para eliminar.' }; break; }
+        const ownerBulkCita = findRow('pacientes', 'id_paciente', bulkCitaPatientId);
+        if (!ownerBulkCita || (String(data.requester) !== String(bulkCitaPatientId) && String(ownerBulkCita.creado_por || '') !== String(data.requester))) {
+          response = { success: false, message: 'Acceso denegado' };
+          break;
+        }
+        const bulkCitaSheet = getSheet('citas');
+        const bulkCitaData = bulkCitaSheet.getDataRange().getValues();
+        const bulkCitaHeaders = bulkCitaData[0] || [];
+        const idxBulkCitaId = bulkCitaHeaders.indexOf('id_cita');
+        const idxBulkCitaPatient = bulkCitaHeaders.indexOf('id_paciente');
+        if (idxBulkCitaId === -1 || idxBulkCitaPatient === -1) { response = { success: false, message: 'Estructura de citas incompleta.' }; break; }
+        const bulkCitaMap = {};
+        bulkCitaIds.forEach(function(id) { bulkCitaMap[String(id || '').trim()] = true; });
+        let bulkCitaMatches = 0;
+        let bulkCitaInvalidPatient = false;
+        for (let i = 1; i < bulkCitaData.length; i++) {
+          const rowId = String(bulkCitaData[i][idxBulkCitaId] || '').trim();
+          if (!bulkCitaMap[rowId]) continue;
+          const rowPatientId = String(bulkCitaData[i][idxBulkCitaPatient] || '').trim();
+          if (rowPatientId !== bulkCitaPatientId) {
+            bulkCitaInvalidPatient = true;
+            break;
+          }
+          bulkCitaMatches++;
+        }
+        if (bulkCitaInvalidPatient) { response = { success: false, message: 'Una o mas citas no pertenecen a este paciente.' }; break; }
+        if (!bulkCitaMatches) { response = { success: false, message: 'No se encontraron citas para eliminar.' }; break; }
+        response = deleteAppointmentsBulk(bulkCitaIds);
+        break;
+
+      case "get_taken_slots":
+        if (!data.requester) {
+          response = { success: false, message: "Acceso denegado: requester faltante" };
+        } else {
+          response = { success: true, data: getTakenSlots(data.fecha, data) };
+        }
+        break;
+
+      case "get_week_appointments":
+        if (!data.requester) {
+          response = { success: false, message: "Acceso denegado: requester faltante" };
+        } else {
+          response = { success: true, data: getWeekAppointmentsForRequester_(data.requester, data.fecha_ref) };
+        }
+        break;
+
+      case "get_agenda_month_summary":
+        if (!data.requester) {
+          response = { success: false, message: "Acceso denegado: requester faltante" };
+        } else {
+          response = { success: true, data: getAgendaMonthSummaryForRequester_(data.requester, data.month) };
+        }
+        break;
+
+
+      // ==========================================
+      // 7. PROMOCIONES
+      // ==========================================
+      case "save_promotion":
+        if (!data.requester) {
+          response = { success: false, message: "Acceso denegado: requester faltante" };
+        } else if (!isSuperadminUser(data.requester) && !isAdminUser_(data.requester)) {
+          response = { success: false, message: "Acceso denegado" };
+        } else {
+          response = savePromotion(data.data, data.requester);
+        }
+        break;
+
+      case "get_active_promotion":
+        response = getActivePromotion(data.requester);
+        break;
+
+      case "get_promo_list":
+        if (!data.requester) {
+          response = { success: false, message: "Acceso denegado: requester faltante" };
+        } else if (!isSuperadminUser(data.requester) && !isAdminUser_(data.requester)) {
+          response = { success: false, message: "Acceso denegado" };
+        } else {
+          response = getPromoConfig(data.requester);
+        }
+        break;
+
+      case "delete_promotion":
+        if (!data.requester) {
+          response = { success: false, message: "Acceso denegado: requester faltante" };
+        } else if (!isSuperadminUser(data.requester) && !isAdminUser_(data.requester)) {
+          response = { success: false, message: "Acceso denegado" };
+        } else {
+          response = deletePromotion(data.id, data.requester);
+        }
+        break;
+
+      // ==========================================
+      // 7.1 PUBLICACIONES VISUALES (INFOGRAFIAS)
+      // ==========================================
+      case "save_infographic_post":
+        response = saveInfographicPost_(data.requester, data.data || {});
+        break;
+
+      case "get_infographic_posts_admin":
+        response = getInfographicPostsForAdmin_(data.requester);
+        break;
+
+      case "delete_infographic_post":
+        response = deleteInfographicPost_(data.requester, data.id);
+        break;
+
+      case "get_patient_infographics":
+        response = getInfographicFeedForPatient_(data.requester);
+        break;
+
+
+      // ==========================================
+      // 8. DASHBOARD Y UTILIDADES
+      // ==========================================
+      case "get_dashboard_stats":
+        response = { success: true, data: getDashboardStatsForRequester_(data.requester) };
+        break;
+
+      // ==========================================
+      // 9. SUPERADMIN (GESTION CENTRALIZADA)
+      // ==========================================
+      case "superadmin_get_data":
+        if (!isSuperadminUser(data.requester)) {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        response = getSuperadminData_();
+        break;
+
+      case "superadmin_update_doctor":
+        if (!isSuperadminUser(data.requester)) {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        response = superadminUpdateDoctor_(data.data || {});
+        break;
+
+      case "superadmin_create_doctor":
+        if (!isSuperadminUser(data.requester)) {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        response = superadminCreateDoctor_(data.data || {});
+        break;
+
+      case "superadmin_delete_doctor":
+        if (!isSuperadminUser(data.requester)) {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        response = superadminDeleteDoctor_(data.data && data.data.usuario);
+        break;
+
+      case "superadmin_assign_patient_doctor":
+        if (!isSuperadminUser(data.requester)) {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        response = superadminAssignPatientDoctor_(data.patient_id, data.doctor_usuario);
+        break;
+
+      case "superadmin_update_patient_password":
+        if (!isSuperadminUser(data.requester)) {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        response = superadminUpdatePatientPassword_(data.patient_id, data.new_password);
+        break;
+
+      case "superadmin_update_patient_management":
+        if (!isSuperadminUser(data.requester)) {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        response = superadminUpdatePatientManagement_(data.data || {});
+        break;
+
+      case "superadmin_delete_patient":
+        if (!isSuperadminUser(data.requester)) {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        response = superadminDeletePatient_(data.patient_id);
+        break;
+
+      case "first_login_keep":
+        response = completeFirstLogin_(data.role, data.user_id, "", data.requester);
+        break;
+
+      case "first_login_update_password":
+        response = completeFirstLogin_(data.role, data.user_id, data.new_password, data.requester);
+        break;
+
+      case "self_update_password":
+        response = updateSelfPassword_(data.role, data.user_id, data.new_password, data.requester);
+        break;
+
+      case "self_update_patient_profile":
+        response = updateSelfPatientProfile_(data.user_id, data.requester, data.data || {});
+        break;
+
+      case "self_update_admin_profile":
+        response = updateSelfAdminProfile_(data.user_id, data.requester, data.data || {});
+        break;
+
+      case "set_my_vacation":
+        response = setMyDoctorVacation_(data.requester, data.data || {});
+        break;
+
+      case "get_my_vacation":
+        response = getMyDoctorVacationForAdmin_(data.requester);
+        break;
+
+      case "get_my_doctor_info":
+        response = getMyDoctorInfo_(data.requester);
+        break;
+
+      case "get_my_doctor_vacation":
+        response = getMyDoctorVacation_(data.requester);
+        break;
+
+      case "logout":
+        response = logoutSession_(data.session_token);
+        break;
+
+      case "get_file_base64":
+        // Utilidad para obtener imagen en base64 (si se usa para editar)
+        if (!data.requester) {
+          response = { success: false, message: "Acceso denegado: requester faltante" };
+          break;
+        }
+        if (!canRequesterAccessFile_(data.requester, data.file_id)) {
+          response = { success: false, message: "Acceso denegado" };
+          break;
+        }
+        try {
+          var file = DriveApp.getFileById(data.file_id);
+          var blob = file.getBlob();
+          var b64 = Utilities.base64Encode(blob.getBytes());
+          var mime = blob.getContentType();
+          response = { success: true, data: "data:" + mime + ";base64," + b64 };
+        } catch (e) {
+          response = { success: false, message: "Error cargando imagen: " + e.toString() };
+        }
+        break;
+
+      default:
+        response = { success: false, message: "Acción API no reconocida: " + action };
+    }
+
+    // 3. Devolver la respuesta en formato JSON
+    logApiTiming_(action, requestStartMs, response);
+    return ContentService.createTextOutput(JSON.stringify(response))
+      .setMimeType(ContentService.MimeType.JSON);
+
+  } catch (error) {
+    // Captura de errores globales
+    return ContentService.createTextOutput(JSON.stringify({ success: false, message: "Error Servidor: " + error.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    // SIEMPRE liberar el bloqueo
+    if (lock && lockAcquired) lock.releaseLock();
+  }
+}
+
+function requiresGlobalLock_(action) {
+  const writeActions = {
+    create_record: true,
+    update_record: true,
+    delete_record: true,
+    save_service_full: true,
+    delete_service_full: true,
+    add_service: true,
+    update_service: true,
+    delete_service: true,
+    save_diagnosis_advanced: true,
+    delete_diagnosis: true,
+    delete_bulk_diagnosis: true,
+    add_diagnosis: true,
+    save_history: true,
+    save_patient_evolution: true,
+    delete_patient_evolution: true,
+    delete_bulk_patient_evolution: true,
+    schedule_appointment: true,
+    reschedule_appointment: true,
+    update_appt_status: true,
+    delete_cita: true,
+    delete_bulk_citas: true,
+    save_promotion: true,
+    delete_promotion: true,
+    save_infographic_post: true,
+    delete_infographic_post: true,
+    superadmin_update_doctor: true,
+    superadmin_create_doctor: true,
+    superadmin_delete_doctor: true,
+    superadmin_assign_patient_doctor: true,
+    superadmin_update_patient_password: true,
+    superadmin_update_patient_management: true,
+    superadmin_delete_patient: true,
+    first_login_keep: true,
+    first_login_update_password: true,
+    self_update_password: true,
+    self_update_patient_profile: true,
+    self_update_admin_profile: true,
+    set_my_vacation: true
+  };
+  return !!writeActions[String(action || "").trim()];
+}
+
+function getSessionTtlSeconds_() {
+  // CacheService en Apps Script soporta hasta 21600s (6h).
+  return 21600;
+}
+
+function getSessionCacheKey_(token) {
+  return "vf_sess_" + String(token || "").trim();
+}
+
+function normalizeSessionUserId_(role, userId) {
+  const r = String(role || "").toLowerCase();
+  const uid = String(userId || "").trim();
+  if (!uid) return "";
+  if (r === "admin" || r === "superadmin") return normalizeTextLower_(uid);
+  return uid;
+}
+
+function issueSessionToken_(role, userId) {
+  const r = String(role || "").toLowerCase();
+  const uid = normalizeSessionUserId_(r, userId);
+  if (!uid || (r !== "admin" && r !== "paciente" && r !== "superadmin")) {
+    return { token: "", expires_at: "" };
+  }
+
+  const nowMs = Date.now();
+  const ttlSec = getSessionTtlSeconds_();
+  const expiresMs = nowMs + (ttlSec * 1000);
+  const raw = uid + "|" + r + "|" + String(nowMs) + "|" + Utilities.getUuid();
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, raw);
+  const token = Utilities.base64EncodeWebSafe(bytes).replace(/=+$/g, "");
+
+  const payload = {
+    role: r,
+    user_id: uid,
+    issued_at: new Date(nowMs).toISOString(),
+    expires_at: new Date(expiresMs).toISOString()
+  };
+
+  CacheService.getScriptCache().put(getSessionCacheKey_(token), JSON.stringify(payload), ttlSec);
+  return { token: token, expires_at: payload.expires_at };
+}
+
+function resolveSessionContext_(token) {
+  const t = String(token || "").trim();
+  if (!t) return { ok: false };
+
+  const raw = CacheService.getScriptCache().get(getSessionCacheKey_(t));
+  if (!raw) return { ok: false };
+
+  let obj = null;
+  try {
+    obj = JSON.parse(raw);
+  } catch (e) {
+    return { ok: false };
+  }
+
+  if (!obj || !obj.user_id || !obj.role || !obj.expires_at) return { ok: false };
+  const expMs = Date.parse(String(obj.expires_at));
+  if (!expMs || expMs <= Date.now()) {
+    try { CacheService.getScriptCache().remove(getSessionCacheKey_(t)); } catch (e) {}
+    return { ok: false };
+  }
+
+  return {
+    ok: true,
+    role: String(obj.role || "").toLowerCase(),
+    user_id: String(obj.user_id || ""),
+    expires_at: String(obj.expires_at || "")
+  };
+}
+
+function requiresSessionToken_(action) {
+  // Modo gradual: activo solo para acciones sensibles.
+  const strictEnabled = true;
+  if (!strictEnabled) return false;
+
+  // Cuando se active strictEnabled, estas acciones exigiran token valido.
+  const strict = {
+    superadmin_get_data: true,
+    superadmin_update_doctor: true,
+    superadmin_create_doctor: true,
+    superadmin_delete_doctor: true,
+    superadmin_assign_patient_doctor: true,
+    superadmin_update_patient_password: true,
+    superadmin_update_patient_management: true,
+    superadmin_delete_patient: true,
+    first_login_keep: true,
+    first_login_update_password: true,
+    self_update_password: true,
+    self_update_patient_profile: true,
+    self_update_admin_profile: true,
+    set_my_vacation: true,
+    get_my_vacation: true,
+    get_my_doctor_vacation: true,
+    get_file_base64: true,
+    save_promotion: true,
+    get_active_promotion: true,
+    get_promo_list: true,
+    delete_promotion: true,
+    save_infographic_post: true,
+    get_infographic_posts_admin: true,
+    delete_infographic_post: true,
+    get_patient_infographics: true
+  };
+  return !!strict[String(action || "").trim()];
+}
+
+function isSessionRoleAllowedForAction_(action, role) {
+  const act = String(action || "").trim();
+  const r = String(role || "").toLowerCase();
+  if (!act || !r) return false;
+
+  if (act.indexOf("superadmin_") === 0) return r === "superadmin";
+  if (act === "self_update_admin_profile") return r === "admin";
+  if (act === "self_update_patient_profile") return r === "paciente";
+  if (act === "set_my_vacation" || act === "get_my_vacation") return r === "admin";
+  if (act === "get_my_doctor_vacation") return r === "paciente";
+  if (act === "save_promotion" || act === "get_promo_list" || act === "delete_promotion") {
+    return r === "admin" || r === "superadmin";
+  }
+  if (act === "get_active_promotion") return r === "paciente";
+  if (act === "save_infographic_post" || act === "get_infographic_posts_admin" || act === "delete_infographic_post") {
+    return r === "admin" || r === "superadmin";
+  }
+  if (act === "get_patient_infographics") return r === "paciente";
+  if (act === "self_update_password" || act === "first_login_keep" || act === "first_login_update_password") {
+    return r === "admin" || r === "paciente";
+  }
+  if (act === "get_file_base64") return r === "admin" || r === "paciente" || r === "superadmin";
+  return true;
+}
+
+function requesterMatchesSession_(requester, session) {
+  if (!session || !session.ok) return false;
+  const role = String(session.role || "").toLowerCase();
+  const req = normalizeSessionUserId_(role, requester);
+  const sid = normalizeSessionUserId_(role, session.user_id);
+  return !!req && !!sid && req === sid;
+}
+
+function logoutSession_(token) {
+  const t = String(token || "").trim();
+  if (!t) return { success: true, message: "Sesion cerrada." };
+  try {
+    CacheService.getScriptCache().remove(getSessionCacheKey_(t));
+  } catch (e) {}
+  return { success: true, message: "Sesion cerrada." };
+}
+
+function logApiTiming_(action, startMs, response) {
+  try {
+    const elapsed = Math.max(0, Date.now() - Number(startMs || Date.now()));
+    const act = String(action || "").trim();
+    if (act === "login") {
+      const role = response && response.success ? String(response.role || "") : "fail";
+      console.log("[API_TIMING] action=login role=" + role + " elapsed_ms=" + elapsed);
+      return;
+    }
+    if (elapsed >= 1200) {
+      console.log("[API_TIMING] action=" + act + " elapsed_ms=" + elapsed);
+    }
+  } catch (e) {}
+}
+
+function findRowFastByColumn_(sheetName, colName, value) {
+  const lookup = String(value === undefined || value === null ? "" : value).trim();
+  if (!lookup) return null;
+
+  const sheet = getSheet(sheetName);
+  if (!sheet) return null;
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return null;
+
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const colIndex = headers.indexOf(colName);
+  if (colIndex === -1) return null;
+
+  const searchRange = sheet.getRange(2, colIndex + 1, lastRow - 1, 1);
+  const found = searchRange.createTextFinder(lookup).matchEntireCell(true).findNext();
+  if (!found) return null;
+
+  const rowValues = sheet.getRange(found.getRow(), 1, 1, lastCol).getValues()[0];
+  const rowObj = {};
+  for (let i = 0; i < headers.length; i++) {
+    rowObj[headers[i]] = rowValues[i];
+  }
+  return rowObj;
+}
+
+function getLoginLookupCacheTtlSeconds_() {
+  // Cache corta para acelerar bursts de login sin retener datos por demasiado tiempo.
+  return 30;
+}
+
+function getLoginLookupMissTtlSeconds_() {
+  return 8;
+}
+
+function getLoginLookupCacheKey_(scope, lookup) {
+  const s = String(scope || "").trim();
+  const k = String(lookup || "").trim();
+  if (!s || !k) return "";
+  return "vf_login_lkp_" + s + "_" + k;
+}
+
+function getLoginCachedRow_(scope, lookup) {
+  const key = getLoginLookupCacheKey_(scope, lookup);
+  if (!key) return { hasValue: false, row: null };
+
+  let raw = "";
+  try {
+    raw = CacheService.getScriptCache().get(key);
+  } catch (e) {
+    raw = "";
+  }
+  if (!raw) return { hasValue: false, row: null };
+  if (raw === "__MISS__") return { hasValue: true, row: null };
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return { hasValue: false, row: null };
+    return { hasValue: true, row: parsed };
+  } catch (e) {
+    return { hasValue: false, row: null };
+  }
+}
+
+function setLoginCachedRow_(scope, lookup, rowObj) {
+  const key = getLoginLookupCacheKey_(scope, lookup);
+  if (!key) return;
+
+  try {
+    if (!rowObj) {
+      CacheService.getScriptCache().put(key, "__MISS__", getLoginLookupMissTtlSeconds_());
+      return;
+    }
+    CacheService.getScriptCache().put(key, JSON.stringify(rowObj), getLoginLookupCacheTtlSeconds_());
+  } catch (e) {}
+}
+
+function findAdminByUserForLogin_(usuario) {
+  const user = normalizeTextLower_(usuario);
+  if (!user) return null;
+
+  const cached = getLoginCachedRow_("admin_user", user);
+  if (cached.hasValue) return cached.row;
+
+  const row = findRowFastByColumn_("usuarios_admin", "usuario", user);
+  setLoginCachedRow_("admin_user", user, row);
+  return row;
+}
+
+function findPatientByCedulaForLogin_(cedula) {
+  const doc = normalizeDigits_(cedula);
+  if (!doc) return null;
+
+  const cached = getLoginCachedRow_("paciente_cedula", doc);
+  if (cached.hasValue) return cached.row;
+
+  const row = findRowFastByColumn_("pacientes", "cedula", doc);
+  setLoginCachedRow_("paciente_cedula", doc, row);
+  return row;
+}
+
+function findSuperadminForLogin_(usuario) {
+  const user = normalizeTextLower_(usuario);
+  if (!user) return null;
+
+  const cached = getLoginCachedRow_("superadmin_user", user);
+  if (cached.hasValue) return cached.row;
+
+  const row = findSuperadminByUser_(user);
+  setLoginCachedRow_("superadmin_user", user, row);
+  return row;
+}
+
+function buildPatientOwnerMap_() {
+  const rows = getTableData("pacientes");
+  const map = {};
+  for (let i = 0; i < rows.length; i++) {
+    const pid = normalizePatientIdKey_(rows[i].id_paciente);
+    if (!pid) continue;
+    map[pid] = normalizeTextLower_(rows[i].creado_por);
+  }
+  return map;
+}
+
+function normalizePatientIdKey_(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const norm = raw.toLowerCase();
+  if (/^\d+$/.test(norm)) {
+    // "00123" y "123" deben tratarse como el mismo id numerico.
+    return String(Number(norm));
+  }
+  return norm;
+}
+
+function canRequesterSeePatient_(requester, patientId, ownerMap) {
+  const req = normalizeTextLower_(requester);
+  const pid = normalizePatientIdKey_(patientId);
+  if (!req || !pid) return false;
+  if (isSuperadminUser(req)) return true;
+  if (normalizePatientIdKey_(req) === pid) return true;
+  const owners = ownerMap || {};
+  return normalizeTextLower_(owners[pid]) === req;
+}
+
+function getServiceOwnerMeta_(serviceName) {
+  const target = String(serviceName || "").trim();
+  if (!target) return { exists: false, owner: "" };
+
+  const sheet = getConnection().getSheetByName("servicios");
+  if (!sheet || sheet.getLastRow() < 2) return { exists: false, owner: "" };
+
+  const raw = sheet.getDataRange().getValues();
+  if (!raw.length) return { exists: false, owner: "" };
+
+  const headers = raw[0];
+  const idxName = headers.indexOf("nombre_servicio");
+  const idxOwner = headers.indexOf("owner_usuario");
+  if (idxName === -1) return { exists: false, owner: "" };
+
+  for (let i = 1; i < raw.length; i++) {
+    if (String(raw[i][idxName] || "").trim() !== target) continue;
+    return {
+      exists: true,
+      owner: idxOwner > -1 ? normalizeTextLower_(raw[i][idxOwner]) : ""
+    };
+  }
+  return { exists: false, owner: "" };
+}
+
+function canRequesterManageService_(requester, serviceName) {
+  const req = normalizeTextLower_(requester);
+  if (!req) return false;
+  if (isSuperadminUser(req)) return true;
+  if (!isAdminUser_(req)) return false;
+
+  const target = String(serviceName || "").trim();
+  if (!target) return true; // creacion de servicio nuevo
+
+  const meta = getServiceOwnerMeta_(target);
+  if (!meta.exists) return true; // nombre nuevo
+  if (!meta.owner) return false; // legacy sin owner: solo superadmin
+  return meta.owner === req;
+}
+
+function filterAppointmentsForRequester_(appointments, requester, ownerMap) {
+  if (!Array.isArray(appointments)) return [];
+  const req = normalizeTextLower_(requester);
+  if (!req) return [];
+  if (isSuperadminUser(req)) return appointments;
+  const owners = ownerMap || {};
+  return appointments.filter(appt => canRequesterSeePatient_(req, appt.id_paciente, owners));
+}
+
+function extractDriveFileIdFromUrl_(url) {
+  const val = String(url || "");
+  if (!val) return "";
+  const m1 = val.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (m1 && m1[1]) return m1[1];
+  const m2 = val.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (m2 && m2[1]) return m2[1];
+  return "";
+}
+
+function canRequesterAccessFile_(requester, fileId) {
+  const req = normalizeTextLower_(requester);
+  const fid = String(fileId || "").trim();
+  if (!req || !fid) return false;
+  if (isSuperadminUser(req)) return true;
+
+  const owners = buildPatientOwnerMap_();
+  const reports = getHistoryByFileIdCandidate_(fid);
+  for (let i = 0; i < reports.length; i++) {
+    const rep = reports[i];
+    if (!canRequesterSeePatient_(req, rep.id_paciente, owners)) continue;
+    if (reportContainsFileId_(rep, fid)) return true;
+  }
+  return false;
+}
+
+function getHistoryByFileIdCandidate_(fileId) {
+  const sheet = getConnection().getSheetByName("diagnosticos_archivos");
+  if (!sheet) return [];
+  const raw = sheet.getDataRange().getValues();
+  if (raw.length <= 1) return [];
+  const headers = raw[0];
+  const idxPatient = headers.indexOf("id_paciente");
+  const idxJson = headers.indexOf("datos_json");
+  const idxPdf = headers.indexOf("pdf_url") > -1 ? headers.indexOf("pdf_url") : headers.indexOf("pdf_link");
+  if (idxPatient === -1) return [];
+  const out = [];
+  for (let i = 1; i < raw.length; i++) {
+    const row = raw[i];
+    // Filtro rápido por texto para evitar parsear todo innecesariamente.
+    const rawJson = idxJson > -1 ? String(row[idxJson] || "") : "";
+    const rawPdf = idxPdf > -1 ? String(row[idxPdf] || "") : "";
+    if (rawJson.indexOf(fileId) === -1 && rawPdf.indexOf(fileId) === -1) continue;
+    out.push({
+      id_paciente: String(row[idxPatient] || "").trim(),
+      datos_json: rawJson,
+      pdf_link: rawPdf
+    });
+  }
+  return out;
+}
+
+function reportContainsFileId_(rep, fileId) {
+  const fid = String(fileId || "").trim();
+  if (!fid || !rep) return false;
+  if (extractDriveFileIdFromUrl_(rep.pdf_link) === fid) return true;
+
+  let json = {};
+  try { json = JSON.parse(rep.datos_json || "{}"); } catch (e) { json = {}; }
+
+  const list = Array.isArray(json.drive_file_ids) ? json.drive_file_ids : [];
+  for (let i = 0; i < list.length; i++) {
+    if (String(list[i] || "").trim() === fid) return true;
+  }
+
+  if (extractDriveFileIdFromUrl_(json.pdf_receta_link) === fid) return true;
+  if (extractDriveFileIdFromUrl_(json.pdf_externo_link) === fid) return true;
+  const externalList = Array.isArray(json.pdf_externos) ? json.pdf_externos : [];
+  for (let i = 0; i < externalList.length; i++) {
+    const entry = externalList[i] || {};
+    if (extractDriveFileIdFromUrl_(entry.url || entry.pdf_externo_link) === fid) return true;
+    if (String(entry.file_id || entry.fileId || "").trim() === fid) return true;
+  }
+  return false;
+}
+
+// ==========================================
+// FUNCIONES AUXILIARES NECESARIAS
+// ==========================================
+
+// Función para obtener el mapa de configuración (VITAL para el editor visual)
+function getServiceConfigMap(requester) {
+  const sheet = getConnection().getSheetByName("config_campos");
+  if (!sheet) return {}; 
+
+  let allowed = null;
+  const req = String(requester || "").trim();
+  if (req) {
+    allowed = {};
+    const list = getServices(req) || [];
+    for (let i = 0; i < list.length; i++) {
+      allowed[String(list[i].nombre_servicio || "").trim()] = true;
+    }
+  }
+
+  const rawData = sheet.getDataRange().getValues();
+  let map = {};
+
+  // Col A=Servicio, B=Nombre, C=Etiqueta, D=Tipo, E=Opciones
+  for (let i = 1; i < rawData.length; i++) {
+    const servicio = rawData[i][0];
+    if (allowed && !allowed[String(servicio || "").trim()]) continue;
+    const campo = {
+      nombre: rawData[i][1],
+      etiqueta: rawData[i][2],
+      tipo: rawData[i][3],
+      opciones: rawData[i][4] || "" // <--- LEER COLUMNA E
+    };
+
+    if (!map[servicio]) map[servicio] = [];
+    map[servicio].push(campo);
+  }
+  return map;
+}
+
+function normalizeTextLower_(value) {
+  return String(value === undefined || value === null ? "" : value).trim().toLowerCase();
+}
+
+function normalizeTextUpper_(value) {
+  return String(value === undefined || value === null ? "" : value).trim().toUpperCase();
+}
+
+function normalizeDigits_(value) {
+  return String(value === undefined || value === null ? "" : value).replace(/[^\d]/g, "");
+}
+
+function hasOwnKey_(obj, key) {
+  return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function sanitizeUserData_(row) {
+  const src = row || {};
+  const out = {};
+  for (var key in src) {
+    if (!Object.prototype.hasOwnProperty.call(src, key)) continue;
+    if (String(key) === "password") continue;
+    out[key] = src[key];
+  }
+  return out;
+}
+
+function isPasswordHash_(value) {
+  const raw = String(value || "");
+  return raw.indexOf("sha256$") === 0 && raw.split("$").length === 3;
+}
+
+function hashPassword_(plainPassword) {
+  const plain = String(plainPassword || "");
+  if (!plain) return "";
+  const salt = Utilities.getUuid().replace(/-/g, "").slice(0, 16);
+  const bytes = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    salt + "|" + plain,
+    Utilities.Charset.UTF_8
+  );
+  const hash = Utilities.base64EncodeWebSafe(bytes).replace(/=+$/g, "");
+  return "sha256$" + salt + "$" + hash;
+}
+
+function verifyPassword_(inputPassword, storedPassword) {
+  const input = String(inputPassword || "");
+  const stored = String(storedPassword || "");
+  if (!stored) return false;
+
+  if (!isPasswordHash_(stored)) {
+    return stored === input;
+  }
+
+  const parts = stored.split("$");
+  if (parts.length !== 3) return false;
+  const salt = parts[1];
+  const expected = parts[2];
+  if (!salt || !expected) return false;
+
+  const bytes = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    salt + "|" + input,
+    Utilities.Charset.UTF_8
+  );
+  const actual = Utilities.base64EncodeWebSafe(bytes).replace(/=+$/g, "");
+  return actual === expected;
+}
+
+function toStoredPassword_(value) {
+  const pass = String(value || "").trim();
+  if (!pass) return "";
+  if (isPasswordHash_(pass)) return pass;
+  return hashPassword_(pass);
+}
+
+function preparePasswordForSheet_(sheetName, payload) {
+  const out = payload || {};
+  const sheet = normalizeTextLower_(sheetName);
+  if (sheet !== "pacientes" && sheet !== "usuarios_admin" && sheet !== "usuarios_superadmin") return out;
+  if (!hasOwnKey_(out, "password")) return out;
+  out.password = toStoredPassword_(out.password);
+  return out;
+}
+
+function normalizeDoctorPayload_(payload) {
+  const out = payload || {};
+  if (hasOwnKey_(out, "old_usuario")) out.old_usuario = normalizeTextLower_(out.old_usuario);
+  if (hasOwnKey_(out, "usuario")) out.usuario = normalizeTextLower_(out.usuario);
+  if (hasOwnKey_(out, "nombre_doctor")) out.nombre_doctor = normalizeTextUpper_(out.nombre_doctor);
+  if (hasOwnKey_(out, "rol")) out.rol = normalizeTextUpper_(out.rol);
+  if (hasOwnKey_(out, "correo_notificaciones")) out.correo_notificaciones = normalizeTextLower_(out.correo_notificaciones);
+  if (hasOwnKey_(out, "telefono")) out.telefono = normalizeDigits_(out.telefono);
+  if (hasOwnKey_(out, "registro_sanitario")) out.registro_sanitario = normalizeTextUpper_(out.registro_sanitario);
+  if (hasOwnKey_(out, "usar_firma_virtual")) out.usar_firma_virtual = boolToSheetFlag_(out.usar_firma_virtual);
+  return out;
+}
+
+function normalizePatientPayload_(payload) {
+  const out = payload || {};
+  if (hasOwnKey_(out, "nombre_completo")) out.nombre_completo = normalizeTextUpper_(out.nombre_completo);
+  if (hasOwnKey_(out, "cedula")) out.cedula = normalizeDigits_(out.cedula);
+  if (hasOwnKey_(out, "telefono")) out.telefono = normalizeDigits_(out.telefono);
+  if (hasOwnKey_(out, "correo")) out.correo = normalizeTextLower_(out.correo);
+  if (hasOwnKey_(out, "antecedentes_medicos")) out.antecedentes_medicos = normalizeTextUpper_(out.antecedentes_medicos);
+  if (hasOwnKey_(out, "direccion")) out.direccion = normalizeTextUpper_(out.direccion);
+  if (hasOwnKey_(out, "ocupacion")) out.ocupacion = normalizeTextUpper_(out.ocupacion);
+  if (hasOwnKey_(out, "creado_por")) out.creado_por = normalizeTextLower_(out.creado_por);
+  if (hasOwnKey_(out, "first_login")) out.first_login = normalizeTextUpper_(out.first_login);
+  return out;
+}
+
+function normalizePayloadForSheet_(sheetName, payload) {
+  const sheet = normalizeTextLower_(sheetName);
+  if (sheet === "usuarios_admin") return normalizeDoctorPayload_(payload);
+  if (sheet === "pacientes") return normalizePatientPayload_(payload);
+  return payload || {};
+}
+
+function mapSheetRowObject_(headers, row) {
+  const obj = {};
+  const cols = Array.isArray(headers) ? headers : [];
+  const values = Array.isArray(row) ? row : [];
+  for (let i = 0; i < cols.length; i++) {
+    obj[cols[i]] = values[i];
+  }
+  return obj;
+}
+
+function collectSyncWarningMessage_(warnings, syncRes, fallbackMessage) {
+  if (!warnings || !Array.isArray(warnings)) return;
+  if (!syncRes || syncRes.success || syncRes.skipped) return;
+  warnings.push(String(syncRes.message || fallbackMessage || "No se pudo sincronizar con Supabase."));
+}
+
+function withSyncWarningResult_(response, warnings) {
+  if (!response || !response.success || !warnings || !warnings.length) return response;
+
+  const out = {};
+  Object.keys(response).forEach(function(key) {
+    out[key] = response[key];
+  });
+
+  out.warning = warnings.join(" | ");
+  const baseMessage = String(out.message || "").trim();
+  out.message = baseMessage
+    ? (baseMessage + " Advertencia: no se pudo sincronizar con Supabase.")
+    : "Advertencia: no se pudo sincronizar con Supabase.";
+  return out;
+}
+
+function normalizeDateYmd_(value) {
+  if (!value) return "";
+  if (typeof toIsoDate === "function") {
+    return toIsoDate(value);
+  }
+  if (value instanceof Date) {
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, "0");
+    const d = String(value.getDate()).padStart(2, "0");
+    return y + "-" + m + "-" + d;
+  }
+  return String(value).split("T")[0];
+}
+
+function parseDateYmd_(ymd) {
+  const parts = String(ymd || "").split("-");
+  if (parts.length !== 3) return null;
+  const y = Number(parts[0]);
+  const m = Number(parts[1]);
+  const d = Number(parts[2]);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d, 12, 0, 0, 0);
+}
+
+function getDashboardStatsForRequester_(requester) {
+  const req = normalizeTextLower_(requester);
+  const patients = getTableData("pacientes");
+  const appointments = getTableData("citas");
+
+  let ownPatients = patients;
+  if (req && !isSuperadminUser(req)) {
+    ownPatients = patients.filter(p => normalizeTextLower_(p.creado_por) === req);
+  }
+
+  const ownPatientIds = {};
+  for (let i = 0; i < ownPatients.length; i++) {
+    ownPatientIds[String(ownPatients[i].id_paciente || "").trim()] = true;
+  }
+
+  const today = new Date();
+  const todayStr = normalizeDateYmd_(today);
+
+  const weekRef = new Date(today);
+  const day = weekRef.getDay();
+  const diff = weekRef.getDate() - day + (day === 0 ? -6 : 1);
+  const monday = new Date(weekRef.setDate(diff));
+  monday.setHours(0, 0, 0, 0);
+  const saturday = new Date(monday);
+  saturday.setDate(monday.getDate() + 5);
+  saturday.setHours(23, 59, 59, 999);
+
+  let countToday = 0;
+  let countWeek = 0;
+
+  for (let i = 0; i < appointments.length; i++) {
+    const appt = appointments[i];
+    const pid = String(appt.id_paciente || "").trim();
+    if (!ownPatientIds[pid]) continue;
+
+    const apptDateStr = normalizeDateYmd_(appt.fecha);
+    if (!apptDateStr) continue;
+
+    if (apptDateStr === todayStr) countToday++;
+
+    const apptDate = parseDateYmd_(apptDateStr);
+    if (apptDate && apptDate >= monday && apptDate <= saturday) {
+      countWeek++;
+    }
+  }
+
+  return {
+    total_pacientes: ownPatients.length,
+    citas_hoy: countToday,
+    citas_semana: countWeek
+  };
+}
+
+function getWeekAppointmentsForRequester_(requester, referenceDate) {
+  const req = normalizeTextLower_(requester);
+  const owners = buildPatientOwnerMap_();
+  const refDate = parseDateYmd_(normalizeDateYmd_(referenceDate)) || parseDateYmd_(normalizeDateYmd_(new Date())) || new Date();
+
+  const weekRef = new Date(refDate);
+  const day = weekRef.getDay();
+  const diff = weekRef.getDate() - day + (day === 0 ? -6 : 1);
+  const monday = new Date(weekRef.setDate(diff));
+  monday.setHours(0, 0, 0, 0);
+
+  const saturday = new Date(monday);
+  saturday.setDate(monday.getDate() + 5);
+  saturday.setHours(23, 59, 59, 999);
+
+  const list = [];
+  const cursor = new Date(monday);
+  while (cursor <= saturday) {
+    const dateKey = normalizeDateYmd_(cursor);
+    const dayRows = filterAppointmentsForRequester_(getAppointmentsByDate(dateKey) || [], req, owners);
+    for (let i = 0; i < dayRows.length; i++) {
+      list.push(dayRows[i]);
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  list.sort(function(a, b) {
+    const aDate = String(a.fecha || "");
+    const bDate = String(b.fecha || "");
+    if (aDate === bDate) return String(a.hora || "").localeCompare(String(b.hora || ""));
+    return aDate.localeCompare(bDate);
+  });
+
+  return {
+    week_start: normalizeDateYmd_(monday),
+    week_end: normalizeDateYmd_(saturday),
+    items: list
+  };
+}
+
+function getAgendaMonthSummaryForRequester_(requester, monthRef) {
+  const req = normalizeTextLower_(requester);
+  const owners = buildPatientOwnerMap_();
+  const monthKey = /^\d{4}-\d{2}$/.test(String(monthRef || "").trim())
+    ? String(monthRef || "").trim()
+    : String(normalizeDateYmd_(monthRef || new Date()) || "").slice(0, 7);
+
+  const appointments = getTableData("citas");
+  const counts = {};
+
+  for (let i = 0; i < appointments.length; i++) {
+    const appt = appointments[i];
+    if (!canRequesterSeePatient_(req, appt.id_paciente, owners)) continue;
+
+    const dateKey = normalizeDateYmd_(appt.fecha);
+    if (!dateKey || dateKey.slice(0, 7) !== monthKey) continue;
+    counts[dateKey] = (counts[dateKey] || 0) + 1;
+  }
+
+  return {
+    month: monthKey,
+    counts: counts,
+    marked_dates: Object.keys(counts).sort()
+  };
+}
+
+function ensureFirstLoginColumn_(sheetName) {
+  const sheet = getConnection().getSheetByName(sheetName);
+  if (!sheet) return;
+  const data = sheet.getDataRange().getValues();
+  if (!data.length) return;
+  const headers = data[0];
+  if (headers.indexOf("first_login") !== -1) return;
+  const newCol = headers.length + 1;
+  sheet.getRange(1, newCol).setValue("first_login");
+  if (sheet.getLastRow() > 1) {
+    sheet.getRange(2, newCol, sheet.getLastRow() - 1, 1).setValues(
+      new Array(sheet.getLastRow() - 1).fill(["NO"])
+    );
+  }
+}
+
+function getFirstLoginValue_(sheetName, keyCol, keyValue) {
+  ensureFirstLoginColumn_(sheetName);
+  const sheet = getConnection().getSheetByName(sheetName);
+  if (!sheet) return false;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return false;
+  const headers = data[0];
+  const idxKey = headers.indexOf(keyCol);
+  const idxFlag = headers.indexOf("first_login");
+  if (idxKey === -1 || idxFlag === -1) return false;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idxKey]).trim() === String(keyValue).trim()) {
+      return String(data[i][idxFlag] || "").toUpperCase() === "SI";
+    }
+  }
+  return false;
+}
+
+function completeFirstLogin_(role, userId, newPassword, requester) {
+  const r = String(role || "").toLowerCase();
+  const id = String(userId || "").trim();
+  const pass = String(newPassword || "").trim();
+  const req = String(requester || "").trim();
+  if (!id || (r !== "admin" && r !== "paciente")) {
+    return { success: false, message: "Datos incompletos." };
+  }
+  if (!req) {
+    return { success: false, message: "Acceso denegado." };
+  }
+  const reqNorm = r === "admin" ? normalizeTextLower_(req) : req;
+  const idNorm = r === "admin" ? normalizeTextLower_(id) : id;
+  if (reqNorm !== idNorm) {
+    return { success: false, message: "Acceso denegado." };
+  }
+
+  const sheetName = r === "admin" ? "usuarios_admin" : "pacientes";
+  const keyCol = r === "admin" ? "usuario" : "id_paciente";
+  ensureFirstLoginColumn_(sheetName);
+
+  const sheet = getConnection().getSheetByName(sheetName);
+  if (!sheet) return { success: false, message: "Hoja no encontrada." };
+  const data = sheet.getDataRange().getValues();
+  if (!data.length) return { success: false, message: "Hoja vacia." };
+  const headers = data[0];
+  const idxKey = headers.indexOf(keyCol);
+  const idxPass = headers.indexOf("password");
+  const idxFlag = headers.indexOf("first_login");
+  if (idxKey === -1 || idxFlag === -1) return { success: false, message: "Estructura incompleta." };
+
+  let rowIndex = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idxKey]).trim() === id) { rowIndex = i + 1; break; }
+  }
+  if (rowIndex === -1) return { success: false, message: "Usuario no encontrado." };
+
+  if (pass && idxPass !== -1) {
+    sheet.getRange(rowIndex, idxPass + 1).setValue(toStoredPassword_(pass));
+  }
+  sheet.getRange(rowIndex, idxFlag + 1).setValue("NO");
+  const syncWarnings = [];
+  if (r === "admin") {
+    const updatedAdmin = findRow("usuarios_admin", "usuario", idNorm) || {};
+    collectSyncWarningMessage_(syncWarnings, syncAdminUserToSupabase_(updatedAdmin), "No se pudo sincronizar el usuario admin.");
+  } else {
+    const updatedPatient = findRow("pacientes", "id_paciente", id) || {};
+    collectSyncWarningMessage_(syncWarnings, syncPatientToSupabase_(updatedPatient), "No se pudo sincronizar el paciente.");
+  }
+
+  return withSyncWarningResult_(
+    { success: true, message: "Primer inicio completado." },
+    syncWarnings
+  );
+}
+
+function updateSelfPassword_(role, userId, newPassword, requester) {
+  const r = String(role || "").toLowerCase();
+  const id = String(userId || "").trim();
+  const req = String(requester || "").trim();
+  const pass = String(newPassword || "").trim();
+
+  if (!id || !pass || (r !== "admin" && r !== "paciente")) {
+    return { success: false, message: "Datos incompletos." };
+  }
+  if (!req) {
+    return { success: false, message: "Acceso denegado." };
+  }
+  const reqNorm = r === "admin" ? normalizeTextLower_(req) : req;
+  const idNorm = r === "admin" ? normalizeTextLower_(id) : id;
+  if (idNorm !== reqNorm) {
+    return { success: false, message: "Acceso denegado." };
+  }
+
+  const sheetName = r === "admin" ? "usuarios_admin" : "pacientes";
+  const keyCol = r === "admin" ? "usuario" : "id_paciente";
+  ensureFirstLoginColumn_(sheetName);
+
+  const sheet = getConnection().getSheetByName(sheetName);
+  if (!sheet) return { success: false, message: "Hoja no encontrada." };
+  const data = sheet.getDataRange().getValues();
+  if (!data.length) return { success: false, message: "Hoja vacia." };
+  const headers = data[0];
+  const idxKey = headers.indexOf(keyCol);
+  const idxPass = headers.indexOf("password");
+  const idxFlag = headers.indexOf("first_login");
+  if (idxKey === -1 || idxPass === -1) {
+    return { success: false, message: "Estructura incompleta." };
+  }
+
+  let rowIndex = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idxKey]).trim() === id) { rowIndex = i + 1; break; }
+  }
+  if (rowIndex === -1) return { success: false, message: "Usuario no encontrado." };
+
+  sheet.getRange(rowIndex, idxPass + 1).setValue(toStoredPassword_(pass));
+  if (idxFlag !== -1) sheet.getRange(rowIndex, idxFlag + 1).setValue("NO");
+  const syncWarnings = [];
+  if (r === "admin") {
+    const updatedAdmin = findRow("usuarios_admin", "usuario", idNorm) || {};
+    collectSyncWarningMessage_(syncWarnings, syncAdminUserToSupabase_(updatedAdmin), "No se pudo sincronizar el usuario admin.");
+  } else {
+    const updatedPatient = findRow("pacientes", "id_paciente", id) || {};
+    collectSyncWarningMessage_(syncWarnings, syncPatientToSupabase_(updatedPatient), "No se pudo sincronizar el paciente.");
+  }
+
+  return withSyncWarningResult_(
+    { success: true, message: "Contrasena actualizada." },
+    syncWarnings
+  );
+}
+
+function updateSelfPatientProfile_(userId, requester, payload) {
+  const uid = String(userId || "").trim();
+  const req = String(requester || "").trim();
+  if (!uid || !req || uid !== req) {
+    return { success: false, message: "Acceso denegado." };
+  }
+
+  const safePayload = payload || {};
+  const writable = {};
+  if (hasOwnKey_(safePayload, "nombre_completo")) writable.nombre_completo = safePayload.nombre_completo;
+  if (hasOwnKey_(safePayload, "correo")) writable.correo = safePayload.correo;
+  if (hasOwnKey_(safePayload, "telefono")) writable.telefono = safePayload.telefono;
+  if (hasOwnKey_(safePayload, "direccion")) writable.direccion = safePayload.direccion;
+  if (hasOwnKey_(safePayload, "ocupacion")) writable.ocupacion = safePayload.ocupacion;
+  if (hasOwnKey_(safePayload, "fecha_nacimiento")) writable.fecha_nacimiento = safePayload.fecha_nacimiento;
+
+  const normalized = normalizePatientPayload_(writable);
+  const sheet = getConnection().getSheetByName("pacientes");
+  if (!sheet) return { success: false, message: "No existe hoja pacientes." };
+
+  const data = sheet.getDataRange().getValues();
+  if (!data.length) return { success: false, message: "Hoja pacientes vacia." };
+  const headers = data[0];
+  const idxId = headers.indexOf("id_paciente");
+  const idxName = headers.indexOf("nombre_completo");
+  const idxMail = headers.indexOf("correo");
+  const idxTel = headers.indexOf("telefono");
+  const idxAddress = headers.indexOf("direccion");
+  const idxJob = headers.indexOf("ocupacion");
+  const idxBirth = headers.indexOf("fecha_nacimiento");
+  if (idxId === -1) return { success: false, message: "Falta columna id_paciente." };
+
+  let rowIndex = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idxId]).trim() === uid) { rowIndex = i + 1; break; }
+  }
+  if (rowIndex === -1) return { success: false, message: "Paciente no encontrado." };
+
+  if (idxName > -1 && hasOwnKey_(normalized, "nombre_completo")) {
+    sheet.getRange(rowIndex, idxName + 1).setValue(normalized.nombre_completo);
+  }
+  if (idxMail > -1 && hasOwnKey_(normalized, "correo")) {
+    sheet.getRange(rowIndex, idxMail + 1).setValue(normalized.correo);
+  }
+  if (idxTel > -1 && hasOwnKey_(normalized, "telefono")) {
+    sheet.getRange(rowIndex, idxTel + 1).setValue(normalized.telefono);
+  }
+  if (idxAddress > -1 && hasOwnKey_(normalized, "direccion")) {
+    sheet.getRange(rowIndex, idxAddress + 1).setValue(normalized.direccion);
+  }
+  if (idxJob > -1 && hasOwnKey_(normalized, "ocupacion")) {
+    sheet.getRange(rowIndex, idxJob + 1).setValue(normalized.ocupacion);
+  }
+  if (idxBirth > -1 && hasOwnKey_(writable, "fecha_nacimiento")) {
+    sheet.getRange(rowIndex, idxBirth + 1).setValue(String(writable.fecha_nacimiento || "").trim());
+  }
+
+  const updated = findRow("pacientes", "id_paciente", uid) || {};
+  const syncWarnings = [];
+  collectSyncWarningMessage_(syncWarnings, syncPatientToSupabase_(updated), "No se pudo sincronizar el paciente.");
+
+  return withSyncWarningResult_({
+    success: true,
+    message: "Perfil actualizado.",
+    data: {
+      id_paciente: String(updated.id_paciente || uid),
+      nombre_completo: String(updated.nombre_completo || ""),
+      cedula: String(updated.cedula || ""),
+      correo: String(updated.correo || ""),
+      telefono: String(updated.telefono || ""),
+      direccion: String(updated.direccion || ""),
+      ocupacion: String(updated.ocupacion || ""),
+      fecha_nacimiento: String(updated.fecha_nacimiento || "")
+    }
+  }, syncWarnings);
+}
+
+function ensureAdminProfileColumns_() {
+  const sheet = getConnection().getSheetByName("usuarios_admin");
+  if (!sheet) return { sheet: null, headers: [] };
+
+  if (sheet.getLastRow() === 0) {
+    return { sheet: sheet, headers: [] };
+  }
+
+  const required = [
+    { name: "registro_sanitario", defaultValue: "" },
+    { name: "usar_firma_virtual", defaultValue: "SI" }
+  ];
+
+  const headers = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), required.length)).getValues()[0];
+  required.forEach(function(def) {
+    if (headers.indexOf(def.name) !== -1) return;
+    const col = sheet.getLastColumn() + 1;
+    sheet.getRange(1, col).setValue(def.name);
+    headers.push(def.name);
+    if (sheet.getLastRow() > 1) {
+      sheet.getRange(2, col, sheet.getLastRow() - 1, 1).setValues(
+        new Array(sheet.getLastRow() - 1).fill([def.defaultValue])
+      );
+    }
+  });
+
+  return { sheet: sheet, headers: headers };
+}
+
+function updateSelfAdminProfile_(userId, requester, payload) {
+  const uid = normalizeTextLower_(userId);
+  const req = normalizeTextLower_(requester);
+  if (!uid || !req || uid !== req) {
+    return { success: false, message: "Acceso denegado." };
+  }
+
+  const normalized = normalizeDoctorPayload_(payload || {});
+  ensureAdminProfileColumns_();
+  const sheet = getConnection().getSheetByName("usuarios_admin");
+  if (!sheet) return { success: false, message: "No existe usuarios_admin." };
+
+  const data = sheet.getDataRange().getValues();
+  if (!data.length) return { success: false, message: "usuarios_admin vacia." };
+  const headers = data[0];
+  const idxUser = headers.indexOf("usuario");
+  const idxName = headers.indexOf("nombre_doctor");
+  const idxRole = headers.indexOf("rol");
+  const idxOccupation = headers.indexOf("ocupacion");
+  const idxMail = headers.indexOf("correo_notificaciones") > -1
+    ? headers.indexOf("correo_notificaciones")
+    : headers.indexOf("correo");
+  const idxTel = headers.indexOf("telefono");
+  const idxRegister = headers.indexOf("registro_sanitario");
+  const idxSignature = headers.indexOf("usar_firma_virtual");
+  if (idxUser === -1) return { success: false, message: "Falta columna usuario." };
+
+  let rowIndex = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (normalizeTextLower_(data[i][idxUser]) === uid) {
+      rowIndex = i + 1;
+      break;
+    }
+  }
+  if (rowIndex === -1) return { success: false, message: "Usuario no encontrado." };
+
+  if (idxName > -1 && hasOwnKey_(normalized, "nombre_doctor")) {
+    sheet.getRange(rowIndex, idxName + 1).setValue(normalized.nombre_doctor);
+  }
+  if (hasOwnKey_(normalized, "rol")) {
+    if (idxRole > -1) sheet.getRange(rowIndex, idxRole + 1).setValue(normalized.rol);
+    if (idxOccupation > -1) sheet.getRange(rowIndex, idxOccupation + 1).setValue(normalized.rol);
+  }
+  if (idxMail > -1 && hasOwnKey_(normalized, "correo_notificaciones")) {
+    sheet.getRange(rowIndex, idxMail + 1).setValue(normalized.correo_notificaciones);
+  }
+  if (idxTel > -1 && hasOwnKey_(normalized, "telefono")) {
+    sheet.getRange(rowIndex, idxTel + 1).setValue(normalized.telefono);
+  }
+  if (idxRegister > -1 && hasOwnKey_(normalized, "registro_sanitario")) {
+    sheet.getRange(rowIndex, idxRegister + 1).setValue(normalized.registro_sanitario);
+  }
+  if (idxSignature > -1 && hasOwnKey_(normalized, "usar_firma_virtual")) {
+    sheet.getRange(rowIndex, idxSignature + 1).setValue(normalized.usar_firma_virtual);
+  }
+
+  const updated = findRow("usuarios_admin", "usuario", uid) || {};
+  setLoginCachedRow_("admin_user", uid, updated);
+  const syncWarnings = [];
+  collectSyncWarningMessage_(syncWarnings, syncAdminUserToSupabase_(updated), "No se pudo sincronizar el usuario admin.");
+
+  return withSyncWarningResult_({
+    success: true,
+    message: "Perfil actualizado.",
+    data: {
+      usuario: String(updated.usuario || uid),
+      nombre_doctor: String(updated.nombre_doctor || ""),
+      rol: String(updated.rol || updated.ocupacion || ""),
+      correo_notificaciones: String(updated.correo_notificaciones || updated.correo || ""),
+      telefono: String(updated.telefono || ""),
+      registro_sanitario: String(updated.registro_sanitario || ""),
+      usar_firma_virtual: hasOwnKey_(updated, "usar_firma_virtual")
+        ? sheetFlagToBool_(updated.usar_firma_virtual)
+        : true
+    }
+  }, syncWarnings);
+}
+
+function getMyDoctorInfo_(requester) {
+  const patientId = String(requester || "").trim();
+  if (!patientId) return { success: false, message: "requester faltante." };
+
+  const patient = findRow("pacientes", "id_paciente", patientId);
+  if (!patient) return { success: false, message: "Paciente no encontrado." };
+
+  const doctorUser = normalizeTextLower_(patient.creado_por || "");
+  if (!doctorUser) {
+    return { success: true, data: { nombre_doctor: "", telefono: "", correo: "" } };
+  }
+
+  const doctor = findRow("usuarios_admin", "usuario", doctorUser);
+  if (!doctor) {
+    return { success: true, data: { nombre_doctor: "", telefono: "", correo: "" } };
+  }
+
+  return {
+    success: true,
+    data: {
+      nombre_doctor: String(doctor.nombre_doctor || doctor.nombre || "").toUpperCase(),
+      telefono: String(doctor.telefono || "").trim(),
+      correo: String(doctor.correo_notificaciones || doctor.correo || "").trim().toLowerCase()
+    }
+  };
+}
+
+function ensureDoctorVacationSheet_() {
+  const ss = getConnection();
+  let sheet = ss.getSheetByName("config_vacaciones");
+  const required = [
+    "doctor_usuario",
+    "activo",
+    "fecha_hasta",
+    "titulo",
+    "mensaje",
+    "fecha_actualizacion"
+  ];
+
+  if (!sheet) {
+    sheet = ss.insertSheet("config_vacaciones");
+    sheet.appendRow(required);
+    return { sheet: sheet, headers: required };
+  }
+
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(required);
+    return { sheet: sheet, headers: required };
+  }
+
+  const lastCol = Math.max(sheet.getLastColumn(), required.length);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  required.forEach(function(name) {
+    if (headers.indexOf(name) === -1) {
+      const col = sheet.getLastColumn() + 1;
+      sheet.getRange(1, col).setValue(name);
+      headers.push(name);
+    }
+  });
+
+  return { sheet: sheet, headers: headers };
+}
+
+function normalizeIsoDateValue_(value) {
+  if (!value) return "";
+  if (value instanceof Date) {
+    try {
+      return Utilities.formatDate(value, "GMT-5", "yyyy-MM-dd");
+    } catch (e) {}
+  }
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) return raw.split("T")[0];
+
+  const parsed = new Date(raw);
+  if (!isNaN(parsed.getTime())) {
+    try {
+      return Utilities.formatDate(parsed, "GMT-5", "yyyy-MM-dd");
+    } catch (e) {}
+  }
+  return raw;
+}
+
+function boolToSheetFlag_(value) {
+  if (value === true || value === 1) return "SI";
+  const v = String(value || "").trim().toLowerCase();
+  if (v === "si" || v === "true" || v === "1" || v === "yes" || v === "on") return "SI";
+  return "NO";
+}
+
+function sheetFlagToBool_(value) {
+  const v = String(value || "").trim().toLowerCase();
+  return v === "si" || v === "true" || v === "1" || v === "yes" || v === "on";
+}
+
+function readDoctorVacationRecord_(doctorUser) {
+  const doctor = normalizeTextLower_(doctorUser);
+  if (!doctor) return null;
+
+  const ensured = ensureDoctorVacationSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return null;
+
+  const idxDoctor = headers.indexOf("doctor_usuario");
+  const idxActive = headers.indexOf("activo");
+  const idxUntil = headers.indexOf("fecha_hasta");
+  const idxTitle = headers.indexOf("titulo");
+  const idxMessage = headers.indexOf("mensaje");
+  const idxUpdated = headers.indexOf("fecha_actualizacion");
+  if (idxDoctor === -1) return null;
+
+  for (let i = 1; i < data.length; i++) {
+    if (normalizeTextLower_(data[i][idxDoctor]) === doctor) {
+      return {
+        rowIndex: i + 1,
+        doctor_usuario: doctor,
+        activo: idxActive > -1 ? sheetFlagToBool_(data[i][idxActive]) : false,
+        fecha_hasta: idxUntil > -1 ? normalizeIsoDateValue_(data[i][idxUntil]) : "",
+        titulo: idxTitle > -1 ? String(data[i][idxTitle] || "").trim() : "",
+        mensaje: idxMessage > -1 ? String(data[i][idxMessage] || "").trim() : "",
+        fecha_actualizacion: idxUpdated > -1 ? normalizeIsoDateValue_(data[i][idxUpdated]) : ""
+      };
+    }
+  }
+  return null;
+}
+
+function isVacationCurrentlyActive_(record) {
+  if (!record || !record.activo) return false;
+  const until = normalizeIsoDateValue_(record.fecha_hasta);
+  if (!until) return false;
+  const today = Utilities.formatDate(new Date(), "GMT-5", "yyyy-MM-dd");
+  return today <= until;
+}
+
+function buildVacationResponse_(record) {
+  const r = record || {};
+  const active = isVacationCurrentlyActive_(r);
+  const until = normalizeIsoDateValue_(r.fecha_hasta);
+  const title = String(r.titulo || "").trim() || "Aviso importante";
+  const message = String(r.mensaje || "").trim() || "Tu medico se encuentra temporalmente fuera del consultorio.";
+  const blockMessage = "No se pueden agendar citas hasta " + (until || "nuevo aviso") + ".";
+  return {
+    success: true,
+    doctor_usuario: String(r.doctor_usuario || "").trim(),
+    active: active,
+    fecha_hasta: until,
+    titulo: title,
+    mensaje: message,
+    fecha_actualizacion: normalizeIsoDateValue_(r.fecha_actualizacion),
+    block_message: blockMessage
+  };
+}
+
+function setMyDoctorVacation_(requester, payload) {
+  const doctorUser = normalizeTextLower_(requester);
+  if (!doctorUser || !isAdminUser_(doctorUser)) {
+    return { success: false, message: "Acceso denegado." };
+  }
+
+  const data = payload || {};
+  const until = normalizeIsoDateValue_(data.fecha_hasta || data.hasta || "");
+  const title = String(data.titulo || "").trim();
+  const message = String(data.mensaje || "").trim();
+  const active = data.activo === undefined ? true : !!data.activo;
+
+  if (active && !until) {
+    return { success: false, message: "Debes indicar la fecha hasta la que estaras fuera." };
+  }
+
+  const ensured = ensureDoctorVacationSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const idxDoctor = headers.indexOf("doctor_usuario");
+  const idxActive = headers.indexOf("activo");
+  const idxUntil = headers.indexOf("fecha_hasta");
+  const idxTitle = headers.indexOf("titulo");
+  const idxMessage = headers.indexOf("mensaje");
+  const idxUpdated = headers.indexOf("fecha_actualizacion");
+  if (idxDoctor === -1) return { success: false, message: "Estructura de vacaciones incompleta." };
+
+  const existing = readDoctorVacationRecord_(doctorUser);
+  const now = new Date();
+
+  if (existing && existing.rowIndex > 1) {
+    if (idxDoctor > -1) sheet.getRange(existing.rowIndex, idxDoctor + 1).setValue(doctorUser);
+    if (idxActive > -1) sheet.getRange(existing.rowIndex, idxActive + 1).setValue(boolToSheetFlag_(active));
+    if (idxUntil > -1) sheet.getRange(existing.rowIndex, idxUntil + 1).setValue(until);
+    if (idxTitle > -1) sheet.getRange(existing.rowIndex, idxTitle + 1).setValue(title);
+    if (idxMessage > -1) sheet.getRange(existing.rowIndex, idxMessage + 1).setValue(message);
+    if (idxUpdated > -1) sheet.getRange(existing.rowIndex, idxUpdated + 1).setValue(now);
+  } else {
+    const row = new Array(headers.length).fill("");
+    if (idxDoctor > -1) row[idxDoctor] = doctorUser;
+    if (idxActive > -1) row[idxActive] = boolToSheetFlag_(active);
+    if (idxUntil > -1) row[idxUntil] = until;
+    if (idxTitle > -1) row[idxTitle] = title;
+    if (idxMessage > -1) row[idxMessage] = message;
+    if (idxUpdated > -1) row[idxUpdated] = now;
+    sheet.appendRow(row);
+  }
+
+  const updated = readDoctorVacationRecord_(doctorUser) || {
+    doctor_usuario: doctorUser,
+    activo: active,
+    fecha_hasta: until,
+    titulo: title,
+    mensaje: message,
+    fecha_actualizacion: now
+  };
+
+  const response = buildVacationResponse_(updated);
+  const syncRes = syncDoctorVacationToSupabase_({
+    doctor_usuario: doctorUser,
+    activo: active,
+    fecha_hasta: normalizeIsoDateValue_(updated.fecha_hasta || until),
+    titulo: title,
+    mensaje: message,
+    fecha_actualizacion: normalizeIsoDateValue_(updated.fecha_actualizacion || now)
+  });
+
+  if (syncRes && !syncRes.success && !syncRes.skipped) {
+    response.warning = syncRes.message || "No se pudo sincronizar con Supabase.";
+    response.message = "Aviso de vacaciones actualizado. Advertencia: no se pudo sincronizar con Supabase.";
+  } else {
+    response.message = "Aviso de vacaciones actualizado.";
+  }
+
+  return response;
+}
+
+function getMyDoctorVacationForAdmin_(requester) {
+  const doctorUser = normalizeTextLower_(requester);
+  if (!doctorUser || !isAdminUser_(doctorUser)) {
+    return { success: false, message: "Acceso denegado." };
+  }
+  const record = readDoctorVacationRecord_(doctorUser);
+  if (!record) {
+    return {
+      success: true,
+      doctor_usuario: doctorUser,
+      active: false,
+      fecha_hasta: "",
+      titulo: "",
+      mensaje: "",
+      fecha_actualizacion: "",
+      block_message: ""
+    };
+  }
+  return buildVacationResponse_(record);
+}
+
+function getMyDoctorVacation_(requester) {
+  const patientId = String(requester || "").trim();
+  if (!patientId) return { success: false, message: "requester faltante." };
+
+  const patient = findRow("pacientes", "id_paciente", patientId);
+  if (!patient) return { success: false, message: "Paciente no encontrado." };
+
+  const doctorUser = normalizeTextLower_(patient.creado_por || "");
+  if (!doctorUser) {
+    return {
+      success: true,
+      doctor_usuario: "",
+      active: false,
+      fecha_hasta: "",
+      titulo: "",
+      mensaje: "",
+      fecha_actualizacion: "",
+      block_message: ""
+    };
+  }
+
+  const record = readDoctorVacationRecord_(doctorUser);
+  if (!record) {
+    return {
+      success: true,
+      doctor_usuario: doctorUser,
+      active: false,
+      fecha_hasta: "",
+      titulo: "",
+      mensaje: "",
+      fecha_actualizacion: "",
+      block_message: ""
+    };
+  }
+  return buildVacationResponse_(record);
+}
+
+function ensureInfographicSheet_() {
+  const ss = getConnection();
+  let sheet = ss.getSheetByName("config_infografias");
+  const required = [
+    "id_post",
+    "doctor_usuario",
+    "scope_visibility",
+    "activo",
+    "titulo",
+    "mensaje",
+    "imagen_url",
+    "imagen_file_id",
+    "show_btn_agenda",
+    "btn_agenda_text",
+    "show_btn_info",
+    "btn_info_text",
+    "btn_info_url",
+    "show_btn_source",
+    "btn_source_text",
+    "btn_source_url",
+    "show_btn_contacto",
+    "btn_contacto_text",
+    "fecha_creacion",
+    "fecha_actualizacion"
+  ];
+
+  if (!sheet) {
+    sheet = ss.insertSheet("config_infografias");
+    sheet.appendRow(required);
+    return { sheet: sheet, headers: required };
+  }
+
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(required);
+    return { sheet: sheet, headers: required };
+  }
+
+  const lastCol = Math.max(sheet.getLastColumn(), required.length);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  required.forEach(function(name) {
+    if (headers.indexOf(name) === -1) {
+      const col = sheet.getLastColumn() + 1;
+      sheet.getRange(1, col).setValue(name);
+      headers.push(name);
+    }
+  });
+
+  return { sheet: sheet, headers: headers };
+}
+
+function normalizeInfographicScope_(value) {
+  const v = String(value || "").trim().toUpperCase();
+  return v === "ALL" ? "ALL" : "OWNER";
+}
+
+function sanitizeInfographicText_(value, maxLen) {
+  const raw = String(value || "").trim();
+  const limit = Number(maxLen || 0);
+  if (!limit || raw.length <= limit) return raw;
+  return raw.substring(0, limit);
+}
+
+function sanitizeInfographicUrl_(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return "";
+}
+
+function isInfographicImageDataUrl_(value) {
+  const raw = String(value || "").trim();
+  return /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(raw);
+}
+
+function inferImageExtByMime_(mime) {
+  const m = String(mime || "").toLowerCase();
+  if (m === "image/jpeg" || m === "image/jpg") return "jpg";
+  if (m === "image/png") return "png";
+  if (m === "image/webp") return "webp";
+  if (m === "image/gif") return "gif";
+  return "jpg";
+}
+
+function ensureInfographicAssetsFolder_() {
+  const folderName = "VIDAFEM_INFOGRAFIAS";
+  const found = DriveApp.getFoldersByName(folderName);
+  if (found.hasNext()) return found.next();
+  return DriveApp.createFolder(folderName);
+}
+
+function trashFileByIdSafe_(fileId) {
+  const fid = String(fileId || "").trim();
+  if (!fid) return;
+  try { DriveApp.getFileById(fid).setTrashed(true); } catch (e) {}
+}
+
+function uploadInfographicImageFromDataUrl_(doctorUser, imageDataUrl, previousFileId) {
+  const raw = String(imageDataUrl || "").trim();
+  if (!raw || !isInfographicImageDataUrl_(raw)) {
+    return { success: false, message: "Imagen invalida. Debe ser base64 tipo data:image." };
+  }
+
+  const marker = ";base64,";
+  const markerPos = raw.indexOf(marker);
+  if (markerPos < 0) return { success: false, message: "Imagen invalida." };
+  const mime = raw.substring(5, markerPos);
+  const b64 = raw.substring(markerPos + marker.length);
+  if (!mime || !b64) return { success: false, message: "Imagen invalida." };
+
+  let bytes = null;
+  try {
+    bytes = Utilities.base64Decode(b64);
+  } catch (e) {
+    return { success: false, message: "No se pudo decodificar la imagen." };
+  }
+  if (!bytes || !bytes.length) return { success: false, message: "La imagen enviada esta vacia." };
+
+  const ext = inferImageExtByMime_(mime);
+  const safeOwner = normalizeTextLower_(doctorUser || "doctor").replace(/[^\w-]/g, "");
+  const fileName = "info_" + safeOwner + "_" + String(Date.now()) + "." + ext;
+
+  try {
+    const folder = ensureInfographicAssetsFolder_();
+    const blob = Utilities.newBlob(bytes, mime, fileName);
+    const file = folder.createFile(blob);
+    try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (eShare) {}
+    const fileId = file.getId();
+    const viewUrl = "https://drive.google.com/uc?export=view&id=" + fileId;
+    if (previousFileId && String(previousFileId) !== String(fileId)) {
+      trashFileByIdSafe_(previousFileId);
+    }
+    return { success: true, file_id: fileId, url: viewUrl };
+  } catch (e) {
+    return { success: false, message: "No se pudo guardar la imagen: " + e.toString() };
+  }
+}
+
+function normalizePhoneForWaBackend_(phone) {
+  let digits = normalizeDigits_(phone);
+  if (!digits) return "";
+  if (digits.length === 10 && digits.charAt(0) === "0") {
+    digits = "593" + digits.substring(1);
+  } else if (digits.length === 9) {
+    digits = "593" + digits;
+  }
+  return digits;
+}
+
+function mapInfographicRow_(headers, row, rowIndex) {
+  const idxId = headers.indexOf("id_post");
+  const idxDoctor = headers.indexOf("doctor_usuario");
+  const idxScope = headers.indexOf("scope_visibility");
+  const idxActive = headers.indexOf("activo");
+  const idxTitle = headers.indexOf("titulo");
+  const idxMsg = headers.indexOf("mensaje");
+  const idxImage = headers.indexOf("imagen_url");
+  const idxImageFileId = headers.indexOf("imagen_file_id");
+  const idxShowAgenda = headers.indexOf("show_btn_agenda");
+  const idxBtnAgenda = headers.indexOf("btn_agenda_text");
+  const idxShowInfo = headers.indexOf("show_btn_info");
+  const idxBtnInfo = headers.indexOf("btn_info_text");
+  const idxBtnInfoUrl = headers.indexOf("btn_info_url");
+  const idxShowSource = headers.indexOf("show_btn_source");
+  const idxBtnSource = headers.indexOf("btn_source_text");
+  const idxBtnSourceUrl = headers.indexOf("btn_source_url");
+  const idxShowContact = headers.indexOf("show_btn_contacto");
+  const idxBtnContact = headers.indexOf("btn_contacto_text");
+  const idxCreated = headers.indexOf("fecha_creacion");
+  const idxUpdated = headers.indexOf("fecha_actualizacion");
+
+  const idPost = idxId > -1 ? String(row[idxId] || "").trim() : "";
+  if (!idPost) return null;
+
+  const scope = normalizeInfographicScope_(idxScope > -1 ? row[idxScope] : "");
+  const active = idxActive > -1 ? sheetFlagToBool_(row[idxActive]) : true;
+  const showAgenda = idxShowAgenda > -1 ? (String(row[idxShowAgenda] || "").trim() ? sheetFlagToBool_(row[idxShowAgenda]) : true) : true;
+  const showInfo = idxShowInfo > -1 ? (String(row[idxShowInfo] || "").trim() ? sheetFlagToBool_(row[idxShowInfo]) : true) : true;
+  const legacyInfoUrl = sanitizeInfographicUrl_(idxBtnInfoUrl > -1 ? row[idxBtnInfoUrl] : "");
+  const sourceUrl = sanitizeInfographicUrl_(idxBtnSourceUrl > -1 ? row[idxBtnSourceUrl] : "") || legacyInfoUrl;
+  const showSource = idxShowSource > -1
+    ? (String(row[idxShowSource] || "").trim() ? sheetFlagToBool_(row[idxShowSource]) : !!sourceUrl)
+    : !!sourceUrl;
+  const showContact = idxShowContact > -1 ? (String(row[idxShowContact] || "").trim() ? sheetFlagToBool_(row[idxShowContact]) : true) : true;
+  return {
+    rowIndex: rowIndex,
+    id_post: idPost,
+    doctor_usuario: normalizeTextLower_(idxDoctor > -1 ? row[idxDoctor] : ""),
+    scope_visibility: scope,
+    activo: !!active,
+    titulo: sanitizeInfographicText_(idxTitle > -1 ? row[idxTitle] : "", 120),
+    mensaje: sanitizeInfographicText_(idxMsg > -1 ? row[idxMsg] : "", 1600),
+    imagen_url: sanitizeInfographicUrl_(idxImage > -1 ? row[idxImage] : ""),
+    imagen_file_id: idxImageFileId > -1 ? String(row[idxImageFileId] || "").trim() : "",
+    show_btn_agenda: !!showAgenda,
+    btn_agenda_text: sanitizeInfographicText_(idxBtnAgenda > -1 ? row[idxBtnAgenda] : "", 40),
+    show_btn_info: !!showInfo,
+    btn_info_text: sanitizeInfographicText_(idxBtnInfo > -1 ? row[idxBtnInfo] : "", 40),
+    btn_info_url: legacyInfoUrl,
+    show_btn_source: !!showSource,
+    btn_source_text: sanitizeInfographicText_(idxBtnSource > -1 ? row[idxBtnSource] : "", 40) || "Ir a fuente",
+    btn_source_url: sourceUrl,
+    show_btn_contacto: !!showContact,
+    btn_contacto_text: sanitizeInfographicText_(idxBtnContact > -1 ? row[idxBtnContact] : "", 40),
+    fecha_creacion: normalizeIsoDateValue_(idxCreated > -1 ? row[idxCreated] : ""),
+    fecha_actualizacion: normalizeIsoDateValue_(idxUpdated > -1 ? row[idxUpdated] : "")
+  };
+}
+
+function readAllInfographicPosts_() {
+  const ensured = ensureInfographicSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const raw = sheet.getDataRange().getValues();
+  if (raw.length <= 1) return [];
+
+  const out = [];
+  for (let i = 1; i < raw.length; i++) {
+    const mapped = mapInfographicRow_(headers, raw[i], i + 1);
+    if (!mapped) continue;
+    out.push(mapped);
+  }
+  return out;
+}
+
+function buildInfographicRowFromObject_(headers, postObj) {
+  const row = new Array(headers.length).fill("");
+  for (let i = 0; i < headers.length; i++) {
+    const key = headers[i];
+    if (key === "activo") {
+      row[i] = boolToSheetFlag_(postObj.activo);
+    } else if (key === "show_btn_agenda") {
+      row[i] = boolToSheetFlag_(postObj.show_btn_agenda);
+    } else if (key === "show_btn_info") {
+      row[i] = boolToSheetFlag_(postObj.show_btn_info);
+    } else if (key === "show_btn_source") {
+      row[i] = boolToSheetFlag_(postObj.show_btn_source);
+    } else if (key === "show_btn_contacto") {
+      row[i] = boolToSheetFlag_(postObj.show_btn_contacto);
+    } else if (hasOwnKey_(postObj, key)) {
+      row[i] = postObj[key];
+    }
+  }
+  return row;
+}
+
+function canRequesterManageInfographicPost_(requester, doctorOwner) {
+  const req = normalizeTextLower_(requester);
+  const owner = normalizeTextLower_(doctorOwner);
+  if (!req) return false;
+  if (isSuperadminUser(req)) return true;
+  if (!isAdminUser_(req)) return false;
+  return !!owner && owner === req;
+}
+
+function sortInfographicPostsDesc_(arr) {
+  const list = Array.isArray(arr) ? arr.slice() : [];
+  list.sort(function(a, b) {
+    const aKey = String(a.fecha_actualizacion || a.fecha_creacion || "");
+    const bKey = String(b.fecha_actualizacion || b.fecha_creacion || "");
+    return bKey.localeCompare(aKey);
+  });
+  return list;
+}
+
+function saveInfographicPost_(requester, payload) {
+  const req = normalizeTextLower_(requester);
+  if (!req) return { success: false, message: "Acceso denegado: requester faltante." };
+  if (!isSuperadminUser(req) && !isAdminUser_(req)) {
+    return { success: false, message: "Acceso denegado." };
+  }
+
+  const data = payload || {};
+  const inputId = String(data.id_post || data.id || "").trim();
+  const allPosts = readAllInfographicPosts_();
+  const existing = inputId ? allPosts.find(function(p) { return String(p.id_post) === inputId; }) : null;
+  const isEdit = !!existing;
+  if (inputId && !isEdit) {
+    return { success: false, message: "Publicacion no encontrada." };
+  }
+  if (isEdit && !canRequesterManageInfographicPost_(req, existing.doctor_usuario)) {
+    return { success: false, message: "Solo el medico creador puede modificar esta publicacion." };
+  }
+
+  let imageUrl = sanitizeInfographicUrl_(
+    hasOwnKey_(data, "imagen_url") ? data.imagen_url : (isEdit ? existing.imagen_url : "")
+  );
+  let imageFileId = isEdit ? String(existing.imagen_file_id || "").trim() : "";
+  const dataUrl = String(data.imagen_data_url || "").trim();
+  if (dataUrl) {
+    const uploaded = uploadInfographicImageFromDataUrl_(req, dataUrl, imageFileId);
+    if (!uploaded || !uploaded.success) {
+      return { success: false, message: (uploaded && uploaded.message) || "No se pudo guardar la imagen." };
+    }
+    imageUrl = uploaded.url;
+    imageFileId = uploaded.file_id;
+  } else if (isEdit && hasOwnKey_(data, "imagen_url") && imageUrl && imageUrl !== String(existing.imagen_url || "")) {
+    if (imageFileId) trashFileByIdSafe_(imageFileId);
+    imageFileId = "";
+  }
+
+  const now = new Date();
+  const finalPost = {
+    id_post: isEdit ? existing.id_post : ("INFO-" + now.getTime()),
+    doctor_usuario: isEdit ? existing.doctor_usuario : req,
+    scope_visibility: hasOwnKey_(data, "scope_visibility")
+      ? normalizeInfographicScope_(data.scope_visibility)
+      : (isEdit ? existing.scope_visibility : "OWNER"),
+    activo: hasOwnKey_(data, "activo")
+      ? !!data.activo
+      : (isEdit ? !!existing.activo : true),
+    titulo: sanitizeInfographicText_(
+      hasOwnKey_(data, "titulo") ? data.titulo : (isEdit ? existing.titulo : ""),
+      120
+    ),
+    mensaje: sanitizeInfographicText_(
+      hasOwnKey_(data, "mensaje") ? data.mensaje : (isEdit ? existing.mensaje : ""),
+      1600
+    ),
+    imagen_url: imageUrl,
+    imagen_file_id: imageFileId,
+    show_btn_agenda: hasOwnKey_(data, "show_btn_agenda")
+      ? !!data.show_btn_agenda
+      : (isEdit ? !!existing.show_btn_agenda : true),
+    btn_agenda_text: sanitizeInfographicText_(
+      hasOwnKey_(data, "btn_agenda_text") ? data.btn_agenda_text : (isEdit ? existing.btn_agenda_text : "Agenda tu cita"),
+      40
+    ) || "Agenda tu cita",
+    show_btn_info: hasOwnKey_(data, "show_btn_info")
+      ? !!data.show_btn_info
+      : (isEdit ? !!existing.show_btn_info : true),
+    btn_info_text: sanitizeInfographicText_(
+      hasOwnKey_(data, "btn_info_text") ? data.btn_info_text : (isEdit ? existing.btn_info_text : "Mas informacion"),
+      40
+    ) || "Mas informacion",
+    btn_info_url: "",
+    show_btn_source: hasOwnKey_(data, "show_btn_source")
+      ? !!data.show_btn_source
+      : (isEdit ? !!existing.show_btn_source : false),
+    btn_source_text: sanitizeInfographicText_(
+      hasOwnKey_(data, "btn_source_text") ? data.btn_source_text : (isEdit ? existing.btn_source_text : "Ir a fuente"),
+      40
+    ) || "Ir a fuente",
+    btn_source_url: sanitizeInfographicUrl_(
+      hasOwnKey_(data, "btn_source_url") ? data.btn_source_url : (isEdit ? existing.btn_source_url : "")
+    ),
+    show_btn_contacto: hasOwnKey_(data, "show_btn_contacto")
+      ? !!data.show_btn_contacto
+      : (isEdit ? !!existing.show_btn_contacto : true),
+    btn_contacto_text: sanitizeInfographicText_(
+      hasOwnKey_(data, "btn_contacto_text") ? data.btn_contacto_text : (isEdit ? existing.btn_contacto_text : "Contactanos"),
+      40
+    ) || "Contactanos",
+    fecha_creacion: isEdit ? (existing.fecha_creacion || normalizeIsoDateValue_(now)) : normalizeIsoDateValue_(now),
+    fecha_actualizacion: normalizeIsoDateValue_(now)
+  };
+
+  if (!finalPost.imagen_url) {
+    return { success: false, message: "Debes subir una imagen o ingresar una URL valida." };
+  }
+  if (!finalPost.titulo && !finalPost.mensaje) {
+    return { success: false, message: "Debes ingresar al menos un titulo o mensaje." };
+  }
+  if (finalPost.show_btn_source && !finalPost.btn_source_url) {
+    return { success: false, message: "Si habilitas 'Ir a fuente' debes ingresar su enlace." };
+  }
+
+  const ensured = ensureInfographicSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const rowData = buildInfographicRowFromObject_(headers, finalPost);
+
+  if (isEdit) {
+    sheet.getRange(existing.rowIndex, 1, 1, headers.length).setValues([rowData]);
+  } else {
+    sheet.appendRow(rowData);
+  }
+
+  const response = {
+    success: true,
+    message: isEdit ? "Publicacion actualizada." : "Publicacion guardada.",
+    data: finalPost
+  };
+  const syncRes = syncInfographicPostToSupabase_(finalPost);
+  if (syncRes && !syncRes.success && !syncRes.skipped) {
+    response.warning = syncRes.message || "No se pudo sincronizar con Supabase.";
+    response.message = (isEdit ? "Publicacion actualizada." : "Publicacion guardada.") + " Advertencia: no se pudo sincronizar con Supabase.";
+  }
+  return response;
+}
+
+function getInfographicPostsForAdmin_(requester) {
+  const req = normalizeTextLower_(requester);
+  if (!req) return { success: false, message: "Acceso denegado: requester faltante." };
+  const isSuper = isSuperadminUser(req);
+  if (!isSuper && !isAdminUser_(req)) {
+    return { success: false, message: "Acceso denegado." };
+  }
+
+  const allPosts = readAllInfographicPosts_();
+  const filtered = isSuper
+    ? allPosts
+    : allPosts.filter(function(p) { return normalizeTextLower_(p.doctor_usuario) === req; });
+
+  return { success: true, list: sortInfographicPostsDesc_(filtered) };
+}
+
+function deleteInfographicPost_(requester, idPost) {
+  const req = normalizeTextLower_(requester);
+  const postId = String(idPost || "").trim();
+  if (!req || !postId) return { success: false, message: "Acceso denegado." };
+  if (!isSuperadminUser(req) && !isAdminUser_(req)) {
+    return { success: false, message: "Acceso denegado." };
+  }
+
+  const allPosts = readAllInfographicPosts_();
+  const target = allPosts.find(function(p) { return String(p.id_post) === postId; });
+  if (!target) return { success: false, message: "Publicacion no encontrada." };
+  if (!canRequesterManageInfographicPost_(req, target.doctor_usuario)) {
+    return { success: false, message: "Solo el medico creador puede eliminar esta publicacion." };
+  }
+  if (target.imagen_file_id) trashFileByIdSafe_(target.imagen_file_id);
+
+  const ensured = ensureInfographicSheet_();
+  ensured.sheet.deleteRow(target.rowIndex);
+  const syncRes = deleteInfographicPostFromSupabase_(target.id_post);
+  if (syncRes && !syncRes.success && !syncRes.skipped) {
+    return {
+      success: true,
+      message: "Publicacion eliminada. Advertencia: no se pudo sincronizar con Supabase.",
+      warning: syncRes.message || "No se pudo sincronizar con Supabase."
+    };
+  }
+  return { success: true, message: "Publicacion eliminada." };
+}
+
+function getInfographicFeedForPatient_(requester) {
+  const patientId = String(requester || "").trim();
+  if (!patientId) return { success: false, message: "Acceso denegado: requester faltante." };
+
+  const patient = findRowFastByColumn_("pacientes", "id_paciente", patientId) || findRow("pacientes", "id_paciente", patientId);
+  if (!patient) return { success: false, message: "Paciente no encontrado." };
+
+  const myDoctor = normalizeTextLower_(patient.creado_por || "");
+  const allPosts = readAllInfographicPosts_();
+  const visible = allPosts.filter(function(post) {
+    if (!post.activo) return false;
+    if (post.scope_visibility === "ALL") return true;
+    if (!myDoctor) return false;
+    return normalizeTextLower_(post.doctor_usuario) === myDoctor;
+  });
+
+  const sorted = sortInfographicPostsDesc_(visible);
+  const doctorMap = {};
+  const list = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const post = sorted[i];
+    const dUser = normalizeTextLower_(post.doctor_usuario);
+    if (!doctorMap[dUser]) {
+      doctorMap[dUser] = findAdminByUserForLogin_(dUser) || {};
+    }
+    const doctor = doctorMap[dUser] || {};
+    const doctorPhone = normalizePhoneForWaBackend_(doctor.telefono || "");
+    list.push({
+      id_post: post.id_post,
+      doctor_usuario: post.doctor_usuario,
+      doctor_nombre: String(doctor.nombre_doctor || doctor.nombre || "").trim(),
+      scope_visibility: post.scope_visibility,
+      titulo: post.titulo,
+      mensaje: post.mensaje,
+      imagen_url: post.imagen_url,
+      show_btn_agenda: post.show_btn_agenda !== false,
+      btn_agenda_text: post.btn_agenda_text || "Agenda tu cita",
+      show_btn_info: post.show_btn_info !== false,
+      btn_info_text: post.btn_info_text || "Mas informacion",
+      show_btn_source: post.show_btn_source === true,
+      btn_source_text: post.btn_source_text || "Ir a fuente",
+      btn_source_url: post.btn_source_url || "",
+      show_btn_contacto: post.show_btn_contacto !== false,
+      btn_contacto_text: post.btn_contacto_text || "Contactanos",
+      doctor_wa_number: doctorPhone,
+      fecha_actualizacion: post.fecha_actualizacion
+    });
+  }
+
+  return { success: true, list: list };
+}
+
+function getSuperadminSheet_(options) {
+  const opts = options || {};
+  const ensureSeed = opts.ensureSeed === true;
+  const ss = getConnection();
+  let sheet = ss.getSheetByName("usuarios_superadmin");
+  if (!sheet) {
+    sheet = ss.insertSheet("usuarios_superadmin");
+  }
+
+  const required = ["nombre", "usuario", "password", "correo", "telefono"];
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(required);
+    if (ensureSeed) ensureDefaultSuperadmin_(sheet);
+    return sheet;
+  }
+
+  const lastCol = Math.max(sheet.getLastColumn(), required.length);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const normalized = required.slice();
+
+  // Si los encabezados clave no existen, los reescribimos para evitar errores.
+  const hasUsuario = headers.indexOf("usuario") !== -1;
+  const hasPassword = headers.indexOf("password") !== -1;
+  if (!hasUsuario || !hasPassword) {
+    sheet.getRange(1, 1, 1, required.length).setValues([normalized]);
+    if (sheet.getLastColumn() > required.length) {
+      sheet.getRange(1, required.length + 1, 1, sheet.getLastColumn() - required.length).clearContent();
+    }
+  }
+
+  if (ensureSeed) ensureDefaultSuperadmin_(sheet);
+
+  return sheet;
+}
+
+function ensureDefaultSuperadmin_(sheet) {
+  // Primer superusuario solicitado por el propietario del sistema.
+  const seed = {
+    nombre: "EDUARDO",
+    usuario: normalizeTextLower_("eacv"),
+    password: toStoredPassword_("12345"),
+    correo: normalizeTextLower_("eduardocumbevera@gmail.com"),
+    telefono: normalizeDigits_("0982672251")
+  };
+  const seedRow = [seed.nombre, seed.usuario, seed.password, seed.correo, seed.telefono];
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) {
+    sheet.appendRow(seedRow);
+    try { syncSuperadminUserToSupabase_(seed); } catch (e) {}
+    return seed;
+  }
+
+  const headers = data[0];
+  const idxUsuario = headers.indexOf("usuario");
+  if (idxUsuario === -1) return;
+
+  for (let i = 1; i < data.length; i++) {
+    if (normalizeTextLower_(data[i][idxUsuario]) === seed.usuario) {
+      const existing = mapSheetRowObject_(headers, data[i]);
+      existing.usuario = normalizeTextLower_(existing.usuario);
+      existing.correo = normalizeTextLower_(existing.correo);
+      try { syncSuperadminUserToSupabase_(existing); } catch (e) {}
+      return existing;
+    }
+  }
+
+  sheet.appendRow(seedRow);
+  try { syncSuperadminUserToSupabase_(seed); } catch (e) {}
+  return seed;
+}
+
+function findSuperadminByUser_(usuario) {
+  const user = normalizeTextLower_(usuario);
+  if (!user) return null;
+  const sheet = getSuperadminSheet_({ ensureSeed: true });
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow >= 2 && lastCol >= 1) {
+    const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    const idxUser = headers.indexOf("usuario");
+    if (idxUser !== -1) {
+      const found = sheet.getRange(2, idxUser + 1, lastRow - 1, 1)
+        .createTextFinder(user)
+        .matchEntireCell(true)
+        .findNext();
+      if (found) {
+        const values = sheet.getRange(found.getRow(), 1, 1, lastCol).getValues()[0];
+        const row = {};
+        for (let j = 0; j < headers.length; j++) row[headers[j]] = values[j];
+        row.usuario = normalizeTextLower_(row.usuario);
+        row.correo = normalizeTextLower_(row.correo);
+        try { syncSuperadminUserToSupabase_(row); } catch (e) {}
+        return row;
+      }
+    }
+  }
+
+  try {
+    return findSuperadminByUserInSupabase_(user);
+  } catch (e) {
+    return null;
+  }
+}
+
+function isSuperadminUser(usuario) {
+  if (!usuario) return false;
+  const row = findSuperadminByUser_(usuario);
+  return !!row;
+}
+
+function isAdminUser_(usuario) {
+  const user = normalizeTextLower_(usuario);
+  if (!user) return false;
+  const row = findAdminByUserForLogin_(user);
+  return !!row;
+}
+
+function getSuperadminData_() {
+  const ss = getConnection();
+  const doctorsSheet = ss.getSheetByName("usuarios_admin");
+  const patientsSheet = ss.getSheetByName("pacientes");
+
+  if (!doctorsSheet) return { success: false, message: "No existe la hoja usuarios_admin." };
+  if (!patientsSheet) return { success: false, message: "No existe la hoja pacientes." };
+
+  const doctorsRaw = doctorsSheet.getDataRange().getValues();
+  const patientsRaw = patientsSheet.getDataRange().getValues();
+  const dHeaders = doctorsRaw.length ? doctorsRaw[0] : [];
+  const pHeaders = patientsRaw.length ? patientsRaw[0] : [];
+
+  const idxDName = dHeaders.indexOf("nombre_doctor");
+  const idxDUser = dHeaders.indexOf("usuario");
+  const idxDPass = dHeaders.indexOf("password");
+  const idxDRole = dHeaders.indexOf("rol");
+  const idxDMail = dHeaders.indexOf("correo_notificaciones") > -1
+    ? dHeaders.indexOf("correo_notificaciones")
+    : dHeaders.indexOf("correo");
+  const idxDTel = dHeaders.indexOf("telefono");
+  const idxPId = pHeaders.indexOf("id_paciente");
+  const idxPCedula = pHeaders.indexOf("cedula");
+  const idxPName = pHeaders.indexOf("nombre_completo");
+  const idxPCreatedBy = pHeaders.indexOf("creado_por");
+
+  if (idxDName === -1 || idxDUser === -1 || idxDPass === -1) {
+    return { success: false, message: "usuarios_admin requiere: usuario, password, nombre_doctor, rol, correo_notificaciones, telefono." };
+  }
+  if (idxPId === -1 || idxPName === -1 || idxPCreatedBy === -1 || idxPCedula === -1) {
+    return { success: false, message: "pacientes requiere: id_paciente, cedula, nombre_completo, creado_por." };
+  }
+
+  const doctors = [];
+  for (let i = 1; i < doctorsRaw.length; i++) {
+    doctors.push({
+      nombre_doctor: String(doctorsRaw[i][idxDName] || "").toUpperCase(),
+      usuario: String(doctorsRaw[i][idxDUser] || "").trim(),
+      password: String(doctorsRaw[i][idxDPass] || ""),
+      rol: idxDRole > -1 ? String(doctorsRaw[i][idxDRole] || "") : "",
+      correo_notificaciones: idxDMail > -1 ? String(doctorsRaw[i][idxDMail] || "") : "",
+      telefono: idxDTel > -1 ? String(doctorsRaw[i][idxDTel] || "") : ""
+    });
+  }
+
+  const patients = [];
+  for (let i = 1; i < patientsRaw.length; i++) {
+    patients.push({
+      id_paciente: String(patientsRaw[i][idxPId] || ""),
+      cedula: String(patientsRaw[i][idxPCedula] || ""),
+      nombre_completo: String(patientsRaw[i][idxPName] || ""),
+      creado_por: String(patientsRaw[i][idxPCreatedBy] || "")
+    });
+  }
+
+  return { success: true, data: { doctors: doctors, patients: patients } };
+}
+
+function superadminUpdateDoctor_(payload) {
+  payload = normalizeDoctorPayload_(payload || {});
+  const oldUsuario = String(payload.old_usuario || "").trim();
+  const newUsuario = String(payload.usuario || "").trim();
+  const nombreDoctor = String(payload.nombre_doctor || "").trim().toUpperCase();
+  const password = String(payload.password || "").trim();
+  const rol = String(payload.rol || "").trim().toUpperCase();
+  const correoNotificaciones = String(payload.correo_notificaciones || "").trim();
+  const telefono = String(payload.telefono || "").trim();
+
+  if (!oldUsuario || !newUsuario || !nombreDoctor) {
+    return { success: false, message: "Faltan datos del medico." };
+  }
+
+  const ss = getConnection();
+  const doctorsSheet = ss.getSheetByName("usuarios_admin");
+  if (!doctorsSheet) return { success: false, message: "No existe usuarios_admin." };
+
+  const doctorsData = doctorsSheet.getDataRange().getValues();
+  if (!doctorsData.length) return { success: false, message: "usuarios_admin vacia." };
+  const headers = doctorsData[0];
+  const idxDName = headers.indexOf("nombre_doctor");
+  const idxDUser = headers.indexOf("usuario");
+  const idxDPass = headers.indexOf("password");
+  const idxDRole = headers.indexOf("rol");
+  const idxDMail = headers.indexOf("correo_notificaciones") > -1
+    ? headers.indexOf("correo_notificaciones")
+    : headers.indexOf("correo");
+  const idxDTel = headers.indexOf("telefono");
+  const idxFirst = headers.indexOf("first_login");
+  if (idxDName === -1 || idxDUser === -1 || idxDPass === -1) {
+    return { success: false, message: "Faltan columnas requeridas en usuarios_admin." };
+  }
+
+  let rowIndex = -1;
+  for (let i = 1; i < doctorsData.length; i++) {
+    if (String(doctorsData[i][idxDUser]).trim() === oldUsuario) {
+      rowIndex = i + 1;
+      break;
+    }
+  }
+  if (rowIndex === -1) return { success: false, message: "Medico no encontrado." };
+
+  for (let i = 1; i < doctorsData.length; i++) {
+    if ((i + 1) === rowIndex) continue;
+    if (String(doctorsData[i][idxDUser]).trim() === newUsuario) {
+      return { success: false, message: "El usuario ya existe." };
+    }
+  }
+
+  doctorsSheet.getRange(rowIndex, idxDName + 1).setValue(nombreDoctor);
+  doctorsSheet.getRange(rowIndex, idxDUser + 1).setValue(newUsuario);
+  if (password) {
+    doctorsSheet.getRange(rowIndex, idxDPass + 1).setValue(toStoredPassword_(password));
+    if (idxFirst > -1) doctorsSheet.getRange(rowIndex, idxFirst + 1).setValue("SI");
+  }
+  if (idxDRole > -1) doctorsSheet.getRange(rowIndex, idxDRole + 1).setValue(rol || "DOCTOR");
+  if (idxDMail > -1) doctorsSheet.getRange(rowIndex, idxDMail + 1).setValue(correoNotificaciones);
+  if (idxDTel > -1) doctorsSheet.getRange(rowIndex, idxDTel + 1).setValue(telefono);
+
+  let reassignedCount = 0;
+  const reassignedPatientsForSync = [];
+  if (oldUsuario !== newUsuario) {
+    const patientsSheet = ss.getSheetByName("pacientes");
+    if (patientsSheet) {
+      const pData = patientsSheet.getDataRange().getValues();
+      if (pData.length > 1) {
+        const pHeaders = pData[0];
+        const idxPCreatedBy = pHeaders.indexOf("creado_por");
+        if (idxPCreatedBy > -1) {
+          for (let i = 1; i < pData.length; i++) {
+            if (String(pData[i][idxPCreatedBy]).trim() === oldUsuario) {
+              patientsSheet.getRange(i + 1, idxPCreatedBy + 1).setValue(newUsuario);
+              const updatedPatient = mapSheetRowObject_(pHeaders, pData[i]);
+              updatedPatient.creado_por = newUsuario;
+              reassignedPatientsForSync.push(updatedPatient);
+              reassignedCount++;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const syncWarnings = [];
+  if (oldUsuario !== newUsuario) {
+    collectSyncWarningMessage_(syncWarnings, deleteAdminUserFromSupabase_(oldUsuario), "No se pudo eliminar el usuario admin anterior en Supabase.");
+  }
+
+  const updatedDoctor = findRow("usuarios_admin", "usuario", newUsuario) || {};
+  collectSyncWarningMessage_(syncWarnings, syncAdminUserToSupabase_(updatedDoctor), "No se pudo sincronizar el medico.");
+  reassignedPatientsForSync.forEach(function(patientRow) {
+    collectSyncWarningMessage_(syncWarnings, syncPatientToSupabase_(patientRow), "No se pudo sincronizar un paciente reasignado.");
+  });
+
+  return withSyncWarningResult_(
+    { success: true, message: "Medico actualizado.", reassigned_patients: reassignedCount },
+    syncWarnings
+  );
+}
+
+function superadminDeleteDoctor_(doctorUsuario) {
+  const doctor = normalizeTextLower_(doctorUsuario);
+  if (!doctor) return { success: false, message: "Falta usuario del medico." };
+
+  const ss = getConnection();
+  const doctorsSheet = ss.getSheetByName("usuarios_admin");
+  const patientsSheet = ss.getSheetByName("pacientes");
+  if (!doctorsSheet) return { success: false, message: "No existe usuarios_admin." };
+
+  const doctorsData = doctorsSheet.getDataRange().getValues();
+  if (doctorsData.length <= 1) return { success: false, message: "No hay medicos para eliminar." };
+  const dHeaders = doctorsData[0];
+  const idxDUser = dHeaders.indexOf("usuario");
+  if (idxDUser === -1) return { success: false, message: "Falta columna usuario en usuarios_admin." };
+
+  let doctorRowIndex = -1;
+  for (let i = 1; i < doctorsData.length; i++) {
+    if (String(doctorsData[i][idxDUser] || "").trim() === doctor) {
+      doctorRowIndex = i + 1;
+      break;
+    }
+  }
+  if (doctorRowIndex === -1) return { success: false, message: "Medico no encontrado." };
+
+  let unassigned = 0;
+  const unassignedPatientsForSync = [];
+  if (patientsSheet) {
+    const patientsData = patientsSheet.getDataRange().getValues();
+    if (patientsData.length > 1) {
+      const pHeaders = patientsData[0];
+      const idxPCreatedBy = pHeaders.indexOf("creado_por");
+      if (idxPCreatedBy > -1) {
+        for (let i = 1; i < patientsData.length; i++) {
+          if (String(patientsData[i][idxPCreatedBy] || "").trim() === doctor) {
+            patientsSheet.getRange(i + 1, idxPCreatedBy + 1).setValue("");
+            const updatedPatient = mapSheetRowObject_(pHeaders, patientsData[i]);
+            updatedPatient.creado_por = "";
+            unassignedPatientsForSync.push(updatedPatient);
+            unassigned++;
+          }
+        }
+      }
+    }
+  }
+
+  doctorsSheet.deleteRow(doctorRowIndex);
+  const syncWarnings = [];
+  collectSyncWarningMessage_(syncWarnings, deleteAdminUserFromSupabase_(doctor), "No se pudo eliminar el medico en Supabase.");
+  unassignedPatientsForSync.forEach(function(patientRow) {
+    collectSyncWarningMessage_(syncWarnings, syncPatientToSupabase_(patientRow), "No se pudo sincronizar un paciente sin asignar.");
+  });
+
+  return withSyncWarningResult_(
+    { success: true, message: "Medico eliminado.", unassigned_patients: unassigned },
+    syncWarnings
+  );
+}
+
+function superadminAssignPatientDoctor_(patientId, doctorUsuario) {
+  const pid = String(patientId || "").trim();
+  const doctor = normalizeTextLower_(doctorUsuario);
+  if (!pid || !doctor) return { success: false, message: "Faltan datos para asignar." };
+
+  const doctorRow = findRow("usuarios_admin", "usuario", doctor);
+  if (!doctorRow) return { success: false, message: "Doctor no encontrado." };
+
+  const patientsSheet = getConnection().getSheetByName("pacientes");
+  if (!patientsSheet) return { success: false, message: "No existe hoja pacientes." };
+  const rowIndex = findRowIndex(patientsSheet, "id_paciente", pid);
+  if (rowIndex === -1) return { success: false, message: "Paciente no encontrado." };
+
+  const headers = patientsSheet.getRange(1, 1, 1, patientsSheet.getLastColumn()).getValues()[0];
+  const idxPCreatedBy = headers.indexOf("creado_por");
+  if (idxPCreatedBy === -1) return { success: false, message: "No existe columna creado_por." };
+
+  patientsSheet.getRange(rowIndex, idxPCreatedBy + 1).setValue(doctor);
+  const updatedPatient = findRow("pacientes", "id_paciente", pid) || {};
+  const syncWarnings = [];
+  collectSyncWarningMessage_(syncWarnings, syncPatientToSupabase_(updatedPatient), "No se pudo sincronizar el paciente.");
+  return withSyncWarningResult_(
+    { success: true, message: "Paciente reasignado." },
+    syncWarnings
+  );
+}
+
+function superadminCreateDoctor_(payload) {
+  payload = normalizeDoctorPayload_(payload || {});
+  ensureFirstLoginColumn_("usuarios_admin");
+  const nombreDoctor = String(payload.nombre_doctor || "").trim().toUpperCase();
+  const usuario = String(payload.usuario || "").trim();
+  const password = String(payload.password || "").trim();
+  const rol = String(payload.rol || "").trim().toUpperCase();
+  const correoNotificaciones = String(payload.correo_notificaciones || "").trim();
+  const telefono = String(payload.telefono || "").trim();
+
+  if (!nombreDoctor || !usuario || !password) {
+    return { success: false, message: "Completa nombre, usuario y contrasena." };
+  }
+
+  const sheet = getConnection().getSheetByName("usuarios_admin");
+  if (!sheet) return { success: false, message: "No existe usuarios_admin." };
+  const data = sheet.getDataRange().getValues();
+  if (!data.length) return { success: false, message: "usuarios_admin sin cabeceras." };
+
+  const headers = data[0];
+  const idxDName = headers.indexOf("nombre_doctor");
+  const idxDUser = headers.indexOf("usuario");
+  const idxDPass = headers.indexOf("password");
+  const idxDRole = headers.indexOf("rol");
+  const idxDMail = headers.indexOf("correo_notificaciones") > -1
+    ? headers.indexOf("correo_notificaciones")
+    : headers.indexOf("correo");
+  const idxDTel = headers.indexOf("telefono");
+  // Usamos idFirst para evitar el typo reportado (idxFirst/idFirst).
+  const idFirst = headers.indexOf("first_login");
+  if (idxDName === -1 || idxDUser === -1 || idxDPass === -1) {
+    return { success: false, message: "Faltan columnas requeridas en usuarios_admin." };
+  }
+
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idxDUser]).trim() === usuario) {
+      return { success: false, message: "El usuario ya existe." };
+    }
+  }
+
+  const row = new Array(headers.length).fill("");
+  row[idxDName] = nombreDoctor;
+  row[idxDUser] = usuario;
+  row[idxDPass] = toStoredPassword_(password);
+  if (idxDRole > -1) row[idxDRole] = rol || "DOCTOR";
+  if (idxDMail > -1) row[idxDMail] = correoNotificaciones;
+  if (idxDTel > -1) row[idxDTel] = telefono;
+  if (idFirst > -1) row[idFirst] = "SI";
+
+  sheet.appendRow(row);
+  const syncWarnings = [];
+  collectSyncWarningMessage_(syncWarnings, syncAdminUserToSupabase_(mapSheetRowObject_(headers, row)), "No se pudo sincronizar el medico.");
+  return withSyncWarningResult_(
+    { success: true, message: "Medico creado correctamente." },
+    syncWarnings
+  );
+}
+
+function superadminUpdatePatientPassword_(patientId, newPassword) {
+  const pid = String(patientId || "").trim();
+  const pass = String(newPassword || "").trim();
+  if (!pid || !pass) return { success: false, message: "Faltan datos para actualizar clave." };
+
+  const sheet = getConnection().getSheetByName("pacientes");
+  if (!sheet) return { success: false, message: "No existe hoja pacientes." };
+  const data = sheet.getDataRange().getValues();
+  if (!data.length) return { success: false, message: "Hoja pacientes vacia." };
+  const headers = data[0];
+  const idxId = headers.indexOf("id_paciente");
+  const idxPass = headers.indexOf("password");
+  if (idxId === -1 || idxPass === -1) {
+    return { success: false, message: "Faltan columnas id_paciente o password." };
+  }
+
+  let rowIndex = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idxId]).trim() === pid) {
+      rowIndex = i + 1;
+      break;
+    }
+  }
+  if (rowIndex === -1) return { success: false, message: "Paciente no encontrado." };
+
+  sheet.getRange(rowIndex, idxPass + 1).setValue(toStoredPassword_(pass));
+  const updatedPatient = findRow("pacientes", "id_paciente", pid) || {};
+  const syncWarnings = [];
+  collectSyncWarningMessage_(syncWarnings, syncPatientToSupabase_(updatedPatient), "No se pudo sincronizar el paciente.");
+  return withSyncWarningResult_(
+    { success: true, message: "Contrasena de paciente actualizada." },
+    syncWarnings
+  );
+}
+
+function superadminUpdatePatientManagement_(payload) {
+  const pid = String(payload.patient_id || "").trim();
+  const doctor = normalizeTextLower_(payload.doctor_usuario);
+  const pass = String(payload.new_password || "").trim();
+  if (!pid || !doctor) return { success: false, message: "Faltan datos para actualizar paciente." };
+
+  const doctorRow = findRow("usuarios_admin", "usuario", doctor);
+  if (!doctorRow) return { success: false, message: "Doctor no encontrado." };
+
+  const sheet = getConnection().getSheetByName("pacientes");
+  if (!sheet) return { success: false, message: "No existe hoja pacientes." };
+  const data = sheet.getDataRange().getValues();
+  if (!data.length) return { success: false, message: "Hoja pacientes vacia." };
+  const headers = data[0];
+  const idxId = headers.indexOf("id_paciente");
+  const idxDoctor = headers.indexOf("creado_por");
+  const idxPass = headers.indexOf("password");
+  if (idxId === -1 || idxDoctor === -1) {
+    return { success: false, message: "Faltan columnas id_paciente o creado_por." };
+  }
+
+  let rowIndex = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idxId]).trim() === pid) {
+      rowIndex = i + 1;
+      break;
+    }
+  }
+  if (rowIndex === -1) return { success: false, message: "Paciente no encontrado." };
+
+  sheet.getRange(rowIndex, idxDoctor + 1).setValue(doctor);
+  if (pass && idxPass > -1) {
+    sheet.getRange(rowIndex, idxPass + 1).setValue(toStoredPassword_(pass));
+  }
+  const updatedPatient = findRow("pacientes", "id_paciente", pid) || {};
+  const syncWarnings = [];
+  collectSyncWarningMessage_(syncWarnings, syncPatientToSupabase_(updatedPatient), "No se pudo sincronizar el paciente.");
+  return withSyncWarningResult_(
+    { success: true, message: "Paciente actualizado correctamente." },
+    syncWarnings
+  );
+}
+
+function superadminDeletePatient_(patientId) {
+  const pid = String(patientId || "").trim();
+  if (!pid) return { success: false, message: "Falta patient_id." };
+  return deleteRecord("pacientes", pid);
+}

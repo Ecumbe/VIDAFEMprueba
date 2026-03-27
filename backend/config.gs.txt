@@ -1,0 +1,22 @@
+// ID de tu Hoja de Cálculo
+const SPREADSHEET_ID = "1HEp5srbCZDvcvR8zuTZdsCtmUgVUu89MtzKcJ9gtCBQ"; 
+
+// ID de la Plantilla de Google Docs
+const TEMPLATE_ID = "1Y12yV26PskBfkEu2Kt0ksKutQmiTbzbPfdoaODZn-uQ";
+
+// ID del Archivo de Firma
+const SIGNATURE_ID = "1eR6B-HWTblsaQ3Mff5r6EzJFC-QC_xat";
+
+// Nombres exactos de las pestañas
+const SHEETS = {
+  PACIENTES: "pacientes",
+  HISTORIAL: "historial_clinico",
+  EXAMENES: "examenes",
+  CITAS: "citas",
+  ADMINS: "usuarios_admin",
+  DIAGNOSTICOS: "diagnosticos_archivos" // Nueva hoja maestra
+};
+
+function getConnection() {
+  return SpreadsheetApp.openById(SPREADSHEET_ID);
+}

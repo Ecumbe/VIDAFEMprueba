@@ -1,0 +1,33 @@
+﻿ACLARACIONES FASE 2 (SEGURIDAD SIN ROMPER FLUJO)
+Fecha: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+
+1) "Eliminar/neutralizar superadmin por defecto"
+- No significa eliminar el rol superadmin.
+- Significa quitar credenciales fijas predecibles (ej: eacv/12345) en despliegue real.
+- Alternativa segura y gradual:
+  a) Mantener usuario de prueba solo en entorno de prueba.
+  b) Forzar cambio de clave al primer login.
+  c) Bloquear uso de credenciales seed en produccion.
+
+2) "Corregir validaciones debiles requester vacio"
+- Entiendo que el usuario debe cambiar su propia contraseña desde su perfil.
+- Eso se mantiene.
+- Riesgo actual: si backend acepta requester vacio o solo confia en datos del navegador, alguien puede llamar la API por fuera de la UI y cambiar claves.
+- Solucion correcta sin romper UX:
+  a) En frontend no cambia la experiencia.
+  b) En backend se valida contra identidad de sesion real (token/sesion), no solo requester enviado por cliente.
+  c) Se permite cambio SOLO del usuario autenticado sobre su propia cuenta.
+
+3) "Misma utilidad practica, menor exposicion de datos clinicos"
+- Significa conservar exactamente tu modelo funcional:
+  - Paciente ve lo suyo.
+  - Medico ve sus pacientes.
+  - Superadmin ve gestion global.
+- Pero se evita exposicion accidental:
+  a) No devolver listados completos para filtrar en navegador.
+  b) No usar enlaces de archivos demasiado abiertos.
+  c) Responder solo datos autorizados desde backend.
+
+Decision aplicada para el plan:
+- No se rompe el flujo actual de perfil, WhatsApp ni PDFs.
+- Se endurece backend por debajo para que la misma funcionalidad sea mas segura.

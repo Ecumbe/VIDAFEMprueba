@@ -1,0 +1,77 @@
+PASO 1 PARA EMPEZAR A USAR SUPABASE EN EL SISTEMA
+
+1. Abre Supabase.
+2. Entra a tu proyecto.
+3. Ve a SQL Editor.
+4. Crea una consulta nueva.
+5. Abre el archivo:
+   backend/supabase_paso_1_servicios.sql
+6. Copia todo el contenido de ese archivo.
+7. Pegalo en SQL Editor.
+8. Ejecuta la consulta.
+
+Despues de eso:
+
+9. Abre el archivo:
+   js/config.js
+10. Busca esta parte:
+
+   const VF_SUPABASE_CONFIG = {
+     enabled: false,
+     url: "",
+     anonKey: "",
+     features: {
+       services: true,
+       serviceConfig: true
+     }
+   };
+
+11. Cambia:
+   enabled: false
+   por:
+   enabled: true
+
+12. En url pega tu Project URL de Supabase.
+13. En anonKey pega tu anon key de Supabase.
+
+Ejemplo:
+
+const VF_SUPABASE_CONFIG = {
+  enabled: true,
+  url: "https://TU-PROYECTO.supabase.co",
+  anonKey: "TU_ANON_KEY",
+  features: {
+    services: true,
+    serviceConfig: true
+  }
+};
+
+14. Guarda el archivo.
+15. Recarga estas pantallas para probar:
+   - admin.html
+   - diagnostico.html
+   - clinical.html
+   - superadmin.html
+
+Que ya quedo conectado en este paso:
+- Lectura de servicios
+- Lectura de config_campos
+
+Si Supabase falla o todavia no esta listo:
+- el sistema cae automaticamente al Apps Script viejo
+- no deberia romperse la pagina
+
+Archivos tocados en este paso:
+- js/config.js
+- js/data_bridge.js
+- js/admin.js
+- js/diagnostico.js
+- js/clinical.js
+- js/paciente.js
+- js/service_builder_v2.js
+- js/superadmin.js
+- admin.html
+- clinical.html
+- diagnostico.html
+- paciente.html
+- superadmin.html

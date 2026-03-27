@@ -1,0 +1,106 @@
+﻿FASE 3B - Token obligatorio en acciones sensibles (gradual)
+Fecha: 2026-03-05
+
+Objetivo
+- Continuar endurecimiento sin romper modulo general.
+- Activar enforcement solo donde el riesgo es mas alto.
+
+Archivos modificados
+1) backend/API.gs.txt
+2) js/auth.js
+
+CAMBIO 1 - Validar rol de sesion por accion en doPost
+Archivo: backend/API.gs.txt
+
+Fragmento agregado dentro de doPost (bloque de sesion):
+
+if (session.ok) {
+  if (needsSession && !isSessionRoleAllowedForAction_(action, session.role)) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, message: "Acceso denegado." }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+  if (!data.requester) {
+    data.requester = session.user_id;
+  } else if (!requesterMatchesSession_(data.requester, session)) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, message: "Acceso denegado." }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+CAMBIO 2 - Activar strict session solo para endpoints sensibles
+Archivo: backend/API.gs.txt
+
+function requiresSessionToken_(action) {
+  // Modo gradual: activo solo para acciones sensibles.
+  const strictEnabled = true;
+  if (!strictEnabled) return false;
+
+  const strict = {
+    superadmin_get_data: true,
+    superadmin_update_doctor: true,
+    superadmin_create_doctor: true,
+    superadmin_delete_doctor: true,
+    superadmin_assign_patient_doctor: true,
+    superadmin_update_patient_password: true,
+    superadmin_update_patient_management: true,
+    superadmin_delete_patient: true,
+    first_login_keep: true,
+    first_login_update_password: true,
+    self_update_password: true,
+    self_update_patient_profile: true,
+    self_update_admin_profile: true,
+    get_file_base64: true,
+    save_promotion: true,
+    get_promo_list: true,
+    delete_promotion: true
+  };
+  return !!strict[String(action || "").trim()];
+}
+
+CAMBIO 3 - Matriz de rol permitido por accion
+Archivo: backend/API.gs.txt
+
+function isSessionRoleAllowedForAction_(action, role) {
+  const act = String(action || "").trim();
+  const r = String(role || "").toLowerCase();
+  if (!act || !r) return false;
+
+  if (act.indexOf("superadmin_") === 0) return r === "superadmin";
+  if (act === "self_update_admin_profile") return r === "admin";
+  if (act === "self_update_patient_profile") return r === "paciente";
+  if (act === "save_promotion" || act === "get_promo_list" || act === "delete_promotion") {
+    return r === "admin" || r === "superadmin";
+  }
+  if (act === "self_update_password" || act === "first_login_keep" || act === "first_login_update_password") {
+    return r === "admin" || r === "paciente";
+  }
+  if (act === "get_file_base64") return r === "admin" || r === "paciente" || r === "superadmin";
+  return true;
+}
+
+CAMBIO 4 - Respaldo en primer login para enviar session_token
+Archivo: js/auth.js
+
+async function firstLoginApiCall_(payload) {
+  const body = Object.assign({}, payload || {});
+  if (body.action !== "login" && !body.session_token) {
+    try {
+      const raw = sessionStorage.getItem("vidafem_session");
+      const s = raw ? JSON.parse(raw) : null;
+      if (s && s.session_token) body.session_token = s.session_token;
+    } catch (e) {}
+  }
+  const r = await fetch(API_URL, {
+    method: "POST",
+    body: JSON.stringify(body)
+  });
+  return r.json();
+}
+
+Impacto esperado
+- Endpoints sensibles ya no aceptan llamada sin sesion valida.
+- Un token de paciente no puede ejecutar acciones de admin/superadmin.
+- Se mantiene compatibilidad del resto del sistema (enforcement no se aplico a todo el API).
+
+Nota operativa
+- Si habia usuarios con sesion antigua sin token y van a una accion sensible, el sistema pedira re-login.

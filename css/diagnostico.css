@@ -1,0 +1,477 @@
+/* css/diagnostico.css - Estilos Hoja A4 */
+
+.hidden { display: none; }
+
+.paper-sheet {
+    background: white;
+    padding: 40px;
+    border-radius: 5px;
+    box-shadow: 0 5px 20px rgba(0,0,0,0.15);
+    border-top: 10px solid var(--c-primary); /* Borde morado arriba */
+}
+
+.doc-title {
+    text-align: center;
+    color: var(--c-primary);
+    text-transform: uppercase;
+    border-bottom: 2px solid #eee;
+    padding-bottom: 15px;
+    margin-bottom: 25px;
+}
+
+.section-box {
+    margin-bottom: 25px;
+    padding-bottom: 20px;
+    border-bottom: 1px dashed #ccc;
+}
+
+.section-box h4 {
+    color: #555;
+    margin-bottom: 10px;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.doc-input {
+    width: 100%;
+    border: 1px solid #ddd;
+    background: #fdfdfd;
+    padding: 10px;
+    border-radius: 4px;
+    font-family: inherit;
+    resize: vertical;
+}
+
+.check-grid {
+    display: flex;
+    gap: 20px;
+    margin-top: 10px;
+    background: #f9f9f9;
+    padding: 10px;
+    border-radius: 5px;
+}
+
+.tiny-select {
+    padding: 5px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
+
+/* --- GRID DE FOTOS (CLAVE) --- */
+.photo-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr); /* 2 columnas */
+    gap: 15px;
+}
+
+.photo-slot {
+    aspect-ratio: 4/3; /* Formato foto estándar */
+    background: #eee;
+    border: 2px dashed #ccc;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    overflow: hidden;
+    position: relative;
+    transition: all 0.2s;
+}
+
+.photo-slot:hover {
+    background: #e0e0e0;
+    border-color: var(--c-primary);
+}
+
+.photo-placeholder {
+    text-align: center;
+    color: #888;
+    font-size: 0.9rem;
+}
+.photo-placeholder i {
+    font-size: 2rem;
+    margin-bottom: 5px;
+    color: var(--c-secondary);
+}
+
+.photo-slot img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+/* css/diagnostico.css - AÑADIR AL FINAL */
+
+/* --- EDITOR DE FOTOS --- */
+.editor-modal {
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%) scale(0.9);
+    background: white;
+    padding: 0;
+    width: 95%; max-width: 600px;
+    border-radius: 10px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+    z-index: 2000;
+    opacity: 0; pointer-events: none;
+    transition: all 0.3s ease;
+    display: flex; flex-direction: column;
+}
+
+.editor-modal.active {
+    opacity: 1; pointer-events: all;
+    transform: translate(-50%, -50%) scale(1);
+}
+
+.editor-header {
+    padding: 15px 20px;
+    border-bottom: 1px solid #eee;
+    display: flex; justify-content: space-between; align-items: center;
+}
+.editor-body {
+    background: #333;
+    display: flex; justify-content: center; align-items: center;
+    padding: 10px;
+    overflow: hidden;
+    height: 400px; /* Altura del área de dibujo */
+}
+canvas {
+    box-shadow: 0 0 10px rgba(0,0,0,0.5);
+    background: black;
+    max-width: 100%; max-height: 100%;
+}
+.text-edit-modal {
+     position: fixed;
+     left: 50vw;
+     top: 50vh;
+     transform: translate(-50%, -50%);
+     background: #fff;
+     border: 2px solid #36235d;
+     border-radius: 8px;
+     box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+     padding: 24px 18px 12px 18px;
+     z-index: 99999;
+     min-width: 220px;
+     display: flex;
+     flex-direction: column;
+     align-items: center;
+}
+.text-edit-modal.hidden { display: none !important; }
+
+.editor-toolbar {
+    padding: 10px;
+    background: #f8f9fa;
+    display: flex; justify-content: space-between;
+    border-bottom: 1px solid #eee;
+}
+.toolbar-group { display: flex; gap: 10px; }
+.tool-btn {
+    border: none; background: white;
+    width: 40px; height: 40px; border-radius: 50%;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    cursor: pointer; font-size: 1.2rem;
+    transition: transform 0.2s;
+}
+.tool-btn:active { transform: scale(0.9); }
+.tool-btn.active { border: 2px solid #333; transform: scale(1.1); }
+
+.editor-footer { padding: 15px; }
+
+/* Botón flotante "Editar" sobre la foto */
+.btn-edit-photo {
+    position: absolute;
+    bottom: 10px; right: 10px;
+    background: rgba(0,0,0,0.7);
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 15px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    z-index: 10;
+}
+.btn-edit-photo:hover { background: var(--c-primary); }
+/* AL FINAL DE css/diagnostico.css */
+
+/* BOTONES DE FOTO (Editar y Borrar) */
+.photo-wrapper { position: relative; }
+.photo-actions {
+    position: absolute; bottom: 10px; left: 0; right: 0;
+    display: flex; justify-content: center; gap: 10px;
+    z-index: 10;
+}
+.btn-action {
+    background: rgba(0,0,0,0.7); color: white; border: none;
+    width: 35px; height: 35px; border-radius: 50%;
+    cursor: pointer; transition: 0.2s;
+}
+.btn-action:hover { transform: scale(1.1); }
+.btn-action.edit:hover { background: #3498db; }
+.btn-action.delete:hover { background: #e74c3c; }
+
+/* BARRA SUPERIOR EDITOR */
+.editor-toolbar-top {
+    display: flex; justify-content: center; gap: 15px; padding: 10px;
+    background: #f1f2f6; border-bottom: 1px solid #ddd;
+}
+.color-btn {
+    width: 30px; height: 30px; border-radius: 50%; border: 2px solid white;
+    cursor: pointer; box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+}
+.color-btn.active { border-color: #333; transform: scale(1.1); }
+/* AL FINAL DE css/diagnostico.css */
+
+/* CONTENEDOR DINÁMICO */
+.photo-grid-dynamic {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); /* Se adapta a la pantalla */
+    gap: 20px;
+}
+
+/* TARJETA DE FOTO INDIVIDUAL */
+.photo-card {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 10px;
+    position: relative;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+}
+
+.photo-input-title {
+    width: 100%;
+    border: none;
+    border-bottom: 1px solid #ccc;
+    padding: 5px;
+    margin-bottom: 8px;
+    font-size: 0.9rem;
+    font-weight: bold;
+    color: #333;
+    text-align: center;
+}
+.photo-input-title:focus {
+    border-bottom-color: var(--c-primary);
+    outline: none;
+    background: #f9f9f9;
+}
+
+.photo-frame {
+    width: 100%;
+    aspect-ratio: 4/3;
+    background: #f0f0f0;
+    border-radius: 5px;
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    border: 2px dashed #ccc;
+    cursor: pointer;
+}
+
+.photo-frame img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #fff;
+}
+
+.photo-frame:hover { border-color: #aaa; }
+
+.btn-remove-photo {
+    position: absolute;
+    top: -10px; right: -10px;
+    background: #e74c3c; color: white;
+    border: none; width: 25px; height: 25px;
+    border-radius: 50%; cursor: pointer;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+    z-index: 20;
+}
+/* --- CSS MENÚ PERSONALIZADO --- */
+.custom-select-wrapper {
+    position: relative;
+    user-select: none;
+    width: 100%;
+}
+.custom-select-trigger {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 15px;
+    font-size: 1rem;
+    font-weight: bold;
+    color: #333;
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+.custom-select-trigger:after {
+    content: '\25BC'; /* Flecha abajo */
+    font-size: 0.8rem;
+    color: #999;
+}
+.custom-options {
+    position: absolute;
+    display: none;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: #fff;
+    border: 1px solid #eee;
+    border-radius: 8px;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+    z-index: 100;
+    max-height: 300px;
+    overflow-y: auto;
+    margin-top: 5px;
+}
+.custom-options.open {
+    display: block;
+}
+.custom-option {
+    padding: 12px 15px;
+    border-bottom: 1px solid #f9f9f9;
+    cursor: pointer;
+    transition: background 0.2s;
+    font-size: 0.95rem;
+}
+.custom-option:hover {
+    background: #f0f3f6;
+}
+.custom-option.selected {
+    background: #eaf2f8;
+    color: #36235d;
+}
+/* Ocultar el select original feo */
+select#reportTypeSelector {
+    display: none !important;
+}
+/* Estilo para separadores */
+.custom-option.separator {
+    background: #f8f9fa;
+    color: #aaa;
+    font-size: 0.8rem;
+    font-weight: bold;
+    text-align: center;
+    cursor: default;
+    pointer-events: none;
+    letter-spacing: 1px;
+}
+/* Estilos para las filas de campos en el modal */
+.field-row {
+    display: flex; 
+    gap: 5px; 
+    align-items: center; 
+    background: #f9f9f9; 
+    padding: 10px; 
+    border-radius: 6px; 
+    border: 1px solid #eee;
+    transition: background 0.2s;
+}
+.field-row:hover {
+    background: #f0f0f0;
+}
+/* Botones de orden (flechas) */
+.btn-move {
+    background: none;
+    border: none;
+    color: #bdc3c7;
+    cursor: pointer;
+    padding: 2px 5px;
+    font-size: 0.8rem;
+}
+.btn-move:hover {
+    color: #34495e;
+    background: #e0e0e0;
+    border-radius: 4px;
+}
+.btn-remove-field {
+    color: #e74c3c;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 0 5px;
+}
+
+.photo-size-controls {
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.photo-size-inline {
+    display: inline-flex;
+    gap: 6px;
+}
+
+.photo-size-btn {
+    border: 1px solid #cfcfe6;
+    background: #fff;
+    color: #36235d;
+    border-radius: 8px;
+    padding: 4px 10px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.photo-size-btn.active {
+    background: #36235d;
+    color: #fff;
+    border-color: #36235d;
+}
+
+@media (max-width: 900px) {
+    .editor-modal {
+        width: calc(100vw - 16px);
+        max-width: none;
+        max-height: calc(100vh - 16px);
+    }
+
+    .editor-toolbar-top {
+        gap: 8px;
+        padding: 8px;
+        overflow-x: auto;
+        justify-content: flex-start;
+    }
+
+    .editor-body {
+        height: 50vh;
+        min-height: 280px;
+        padding: 8px;
+    }
+
+    .editor-toolbar {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .toolbar-group {
+        width: 100%;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+    }
+
+    .toolbar-group label {
+        font-size: 0.85rem;
+    }
+
+    .toolbar-group select {
+        max-width: 90px;
+    }
+
+    .photo-grid-dynamic {
+        grid-template-columns: 1fr !important;
+        gap: 12px;
+    }
+
+    .photo-card {
+        padding: 8px;
+    }
+}

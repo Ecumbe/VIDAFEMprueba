@@ -1,0 +1,55 @@
+﻿PLAN DE TRABAJO - PREINICIO (GRADUAL Y SIN ROMPER FUNCIONES)
+Fecha: 2026-03-05 15:29:50
+
+Objetivo acordado:
+- Mejorar seguridad, rendimiento (login lento) y estabilidad sin romper flujos actuales.
+- Mantener funcionamiento de WhatsApp para notificaciones.
+- Mantener flujo de PDFs compartidos con mejoras de seguridad progresivas.
+- Ejecutar cambios por fases con validacion en cada paso.
+
+Prioridad 0 (antes de tocar logica critica)
+1) Congelar alcance y checklist de no-regresion por modulo.
+2) Medir tiempos reales actuales (login, dashboard, superadmin data).
+3) Crear plan de rollback por archivo/modulo.
+
+Fase 1 - Rendimiento de login (maxima prioridad de negocio)
+1) Instrumentar tiempos en backend (lectura, validacion usuario, carga inicial).
+2) Reducir lecturas completas de hojas en login y consultas recurrentes.
+3) Introducir cache de lectura segura para datos de autenticacion.
+4) Validar mejora contra baseline (objetivo: bajar de ~15s a rango aceptable).
+
+Fase 2 - Blindaje critico sin cambiar UX principal
+1) Eliminar superadmin por defecto y forzar credenciales seguras.
+2) Cerrar endpoints legacy o sin validacion estricta.
+3) Fortalecer validacion de requester en self_update_password y rutas sensibles.
+4) Mantener compatibilidad actual mientras se prepara sesion segura.
+
+Fase 3 - Sesion/autorizacion real en servidor
+1) Implementar sesion/token firmado en backend (sin depender de requester del cliente).
+2) Aplicar guardas por rol a todas las acciones API.
+3) Migracion gradual para no romper front actual (modo compatibilidad temporal).
+
+Fase 4 - Passwords y datos sensibles
+1) Migrar contrasenas de texto plano a hash con sal.
+2) Quitar exposicion de password en respuestas/UI.
+3) Ajustar WhatsApp: mantener notificacion sin enviar credenciales.
+
+Fase 5 - PDFs/Drive con seguridad progresiva (sin romper uso medico)
+1) Mantener acceso inmediato pero eliminar enlaces excesivamente abiertos.
+2) Implementar esquema de acceso controlado por rol (medico/paciente).
+3) Mantener operatividad del flujo actual mientras se migra permiso por permiso.
+
+Fase 6 - Estabilidad tecnica y mantenimiento
+1) Resolver duplicados en Database.gs.
+2) Unificar conexion a Sheets (una sola estrategia).
+3) Limpiar codigo legacy y endpoints no usados.
+4) Corregir anomalias UI/CSS/HTML detectadas.
+
+Fase 7 - QA y despliegue controlado
+1) Pruebas por rol: superadmin, medico, paciente.
+2) Pruebas de seguridad basicas por endpoint.
+3) Pruebas de rendimiento post-cambio.
+4) Despliegue gradual con monitoreo y retroceso rapido.
+
+Regla operativa
+- Por cada cambio se crea un archivo nuevo en CAMBIOS con fecha/hora, detalle y resultado.

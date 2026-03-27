@@ -1,0 +1,26 @@
+FECHA: 2026-03-06 14:06:00
+TIPO: ajuste puntual modal de infografia en paciente
+
+RESUMEN
+- Se corrigio el modal de "Mas informacion" para que ya no muestre solo texto.
+- Ahora renderiza la imagen de la publicacion arriba y debajo muestra titulo, fecha y contenido completo.
+
+ARCHIVOS TOCADOS
+- js/paciente.js
+- css/dashboard.css
+
+DETALLE
+- En `openInfographicDetailsModal_()` se agrego el bloque visual de imagen usando la misma URL/fallback del carrusel.
+- El encabezado del modal pasa a un titulo generico y el contenido interno ahora dibuja:
+  - imagen
+  - titulo
+  - fecha de actualizacion
+  - texto completo
+- Se extendio `bindInfographicImageFallbacks_()` para soportar tambien la imagen del modal.
+- Se agregaron estilos para contenedor, imagen y cuerpo del modal.
+
+VALIDACION
+- node --check js/paciente.js -> OK
+
+OBSERVACION
+- No se hizo prueba visual en navegador desde este entorno. El siguiente chequeo manual recomendable es abrir una publicacion con "Mas informacion" y confirmar que la imagen salga arriba del texto.

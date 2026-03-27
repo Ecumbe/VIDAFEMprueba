@@ -1,0 +1,4893 @@
+﻿// ==========================================
+// 1. UTILIDADES BÁSICAS (Helpers)
+// ==========================================
+
+function getSheet(name) {
+  const ss = getConnection();
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    // Configuración inicial de cabeceras si se crean hojas nuevas
+    if(name === 'antecedentes_medicos') {
+      sheet.appendRow(['id_paciente', 'antecedentes', 'fecha_registro']);
+    }
+  }
+  return sheet;
+}
+
+// --- HELPER MAESTRO DE FECHAS (CORE FIX) ---
+// Convierte cualquier formato de fecha de Excel a "YYYY-MM-DD"
+function toIsoDate(val) {
+  if (!val) return "";
+  
+  // Si es un Objeto Fecha (lo que devuelve Sheets)
+  if (val instanceof Date) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0'); // Mes base 0
+    const d = String(val.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  
+  // Si ya es Texto (ej: "2026-01-14T00:00...")
+  return String(val).split('T')[0];
+}
+
+// Helper para formatear hora visualmente
+function formatTime(val) {
+  if (!val) return "";
+  if (val instanceof Date) {
+      let h = val.getHours();
+      let m = val.getMinutes();
+      return (h<10?'0':'')+h + ':' + (m<10?'0':'')+m;
+  }
+  return String(val); 
+}
+
+function isPublicFileLinksEnabled_() {
+  // Modo compatible: por defecto se mantiene enlace publico.
+  // Para endurecer sin tocar codigo, definir Script Property:
+  // VIDAFEM_PUBLIC_FILE_LINKS = "false"
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty("VIDAFEM_PUBLIC_FILE_LINKS");
+    const val = String(raw === null || raw === undefined ? "" : raw).trim().toLowerCase();
+    if (val === "false" || val === "0" || val === "no" || val === "off") return false;
+    return true;
+  } catch (e) {
+    return true;
+  }
+}
+
+function applyFileSharingPolicy_(file) {
+  if (!file) return;
+  if (!isPublicFileLinksEnabled_()) return;
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+}
+
+function areEmailsEnabled_() {
+  try {
+    if (typeof EMAILS_ENABLED === "boolean") return EMAILS_ENABLED;
+  } catch (e) {}
+  return false;
+}
+
+function getSupabaseSyncConfig_() {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const enabledRaw = String(props.getProperty("VIDAFEM_SUPABASE_SYNC_ENABLED") || "").trim().toLowerCase();
+    const url = String(props.getProperty("VIDAFEM_SUPABASE_URL") || "").trim().replace(/\/+$/, "");
+    const serviceRole = String(props.getProperty("VIDAFEM_SUPABASE_SERVICE_ROLE") || "").trim();
+    const disabled = enabledRaw === "false" || enabledRaw === "0" || enabledRaw === "no" || enabledRaw === "off";
+    return {
+      enabled: !disabled && !!url && !!serviceRole,
+      url: url,
+      serviceRole: serviceRole
+    };
+  } catch (e) {
+    return { enabled: false, url: "", serviceRole: "" };
+  }
+}
+
+function supabaseRestRequest_(method, tableName, options) {
+  const cfg = getSupabaseSyncConfig_();
+  if (!cfg.enabled) {
+    return { success: false, skipped: true, message: "Sync Supabase desactivado." };
+  }
+
+  const opts = options || {};
+  const query = [];
+  if (opts.onConflict) {
+    query.push("on_conflict=" + encodeURIComponent(String(opts.onConflict)));
+  }
+  if (opts.select) {
+    query.push("select=" + encodeURIComponent(String(opts.select)));
+  }
+  if (opts.filters) {
+    Object.keys(opts.filters).forEach(function(key) {
+      const value = String(opts.filters[key] === undefined || opts.filters[key] === null ? "" : opts.filters[key]).trim();
+      if (!key || !value) return;
+      query.push(encodeURIComponent(key) + "=" + encodeURIComponent("eq." + value));
+    });
+  }
+
+  const url = cfg.url + "/rest/v1/" + encodeURIComponent(String(tableName || "").trim()) + (query.length ? ("?" + query.join("&")) : "");
+  const headers = {
+    "apikey": cfg.serviceRole,
+    "Authorization": "Bearer " + cfg.serviceRole,
+    "Accept": "application/json"
+  };
+  if (opts.prefer) headers["Prefer"] = opts.prefer;
+
+  const params = {
+    method: String(method || "get").toLowerCase(),
+    headers: headers,
+    muteHttpExceptions: true
+  };
+
+  if (hasOwnKey_(opts, "body")) {
+    params.contentType = "application/json";
+    params.payload = JSON.stringify(opts.body);
+  }
+
+  try {
+    const resp = UrlFetchApp.fetch(url, params);
+    const code = resp.getResponseCode();
+    const text = resp.getContentText() || "";
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (eJson) {}
+    if (code >= 200 && code < 300) {
+      return { success: true, status: code, data: data };
+    }
+    return {
+      success: false,
+      status: code,
+      message: text || ("HTTP " + code),
+      data: data
+    };
+  } catch (e) {
+    return { success: false, message: e.toString() };
+  }
+}
+
+function buildPromotionSupabaseRow_(mapped) {
+  const row = mapped || {};
+  return {
+    id_promo: String(row.id || "").trim(),
+    mensaje: String(row.mensaje || "").trim(),
+    fecha_inicio: String(row.inicio || "").trim(),
+    fecha_fin: String(row.fin || "").trim(),
+    fecha_creacion: String(row.fecha_creacion || "").trim(),
+    scope_visibility: String(row.scope_visibility || "OWNER").trim().toUpperCase() === "ALL" ? "ALL" : "OWNER",
+    owner_usuario: String(row.owner_usuario || "").trim().toLowerCase()
+  };
+}
+
+function syncPromotionToSupabase_(mapped) {
+  const row = buildPromotionSupabaseRow_(mapped);
+  if (!row.id_promo) {
+    return { success: false, message: "Promocion sin id_promo." };
+  }
+  return supabaseRestRequest_("post", "config_promociones", {
+    onConflict: "id_promo",
+    prefer: "resolution=merge-duplicates,return=representation",
+    body: row
+  });
+}
+
+function deletePromotionFromSupabase_(idPromo) {
+  const id = String(idPromo || "").trim();
+  if (!id) return { success: false, message: "id_promo faltante." };
+  return supabaseRestRequest_("delete", "config_promociones", {
+    filters: { id_promo: id }
+  });
+}
+
+function buildDoctorVacationSupabaseRow_(record) {
+  const row = record || {};
+  return {
+    doctor_usuario: String(row.doctor_usuario || "").trim().toLowerCase(),
+    activo: (row.activo === true || String(row.activo || "").trim().toLowerCase() === "si") ? "SI" : "NO",
+    fecha_hasta: String(row.fecha_hasta || "").trim(),
+    titulo: String(row.titulo || "").trim(),
+    mensaje: String(row.mensaje || "").trim(),
+    fecha_actualizacion: String(row.fecha_actualizacion || "").trim()
+  };
+}
+
+function syncDoctorVacationToSupabase_(record) {
+  const row = buildDoctorVacationSupabaseRow_(record);
+  if (!row.doctor_usuario) {
+    return { success: false, message: "Vacacion sin doctor_usuario." };
+  }
+
+  const deleteRes = supabaseRestRequest_("delete", "config_vacaciones", {
+    filters: { doctor_usuario: row.doctor_usuario }
+  });
+  if (deleteRes && !deleteRes.success && !deleteRes.skipped) {
+    return deleteRes;
+  }
+
+  return supabaseRestRequest_("post", "config_vacaciones", {
+    prefer: "return=representation",
+    body: row
+  });
+}
+
+function buildInfographicSupabaseRow_(postObj) {
+  const row = postObj || {};
+  return {
+    id_post: String(row.id_post || "").trim(),
+    doctor_usuario: String(row.doctor_usuario || "").trim().toLowerCase(),
+    scope_visibility: String(row.scope_visibility || "OWNER").trim().toUpperCase() === "ALL" ? "ALL" : "OWNER",
+    activo: row.activo ? "SI" : "NO",
+    titulo: String(row.titulo || "").trim(),
+    mensaje: String(row.mensaje || "").trim(),
+    imagen_url: String(row.imagen_url || "").trim(),
+    imagen_file_id: String(row.imagen_file_id || "").trim(),
+    show_btn_agenda: row.show_btn_agenda !== false ? "SI" : "NO",
+    btn_agenda_text: String(row.btn_agenda_text || "").trim(),
+    show_btn_info: row.show_btn_info !== false ? "SI" : "NO",
+    btn_info_text: String(row.btn_info_text || "").trim(),
+    btn_info_url: String(row.btn_info_url || "").trim(),
+    show_btn_source: row.show_btn_source === true ? "SI" : "NO",
+    btn_source_text: String(row.btn_source_text || "").trim(),
+    btn_source_url: String(row.btn_source_url || "").trim(),
+    show_btn_contacto: row.show_btn_contacto !== false ? "SI" : "NO",
+    btn_contacto_text: String(row.btn_contacto_text || "").trim(),
+    fecha_creacion: String(row.fecha_creacion || "").trim(),
+    fecha_actualizacion: String(row.fecha_actualizacion || "").trim()
+  };
+}
+
+function syncInfographicPostToSupabase_(postObj) {
+  const row = buildInfographicSupabaseRow_(postObj);
+  if (!row.id_post) {
+    return { success: false, message: "Infografia sin id_post." };
+  }
+
+  const deleteRes = supabaseRestRequest_("delete", "config_infografias", {
+    filters: { id_post: row.id_post }
+  });
+  if (deleteRes && !deleteRes.success && !deleteRes.skipped) {
+    return deleteRes;
+  }
+
+  return supabaseRestRequest_("post", "config_infografias", {
+    prefer: "return=representation",
+    body: row
+  });
+}
+
+function deleteInfographicPostFromSupabase_(idPost) {
+  const id = String(idPost || "").trim();
+  if (!id) return { success: false, message: "id_post faltante." };
+  return supabaseRestRequest_("delete", "config_infografias", {
+    filters: { id_post: id }
+  });
+}
+
+function normalizeServiceScopeForSupabase_(value) {
+  return String(value || "").trim().toUpperCase() === "OWNER" ? "OWNER" : "ALL";
+}
+
+function buildServiceSupabaseRow_(serviceObj) {
+  const row = serviceObj || {};
+  return {
+    id: String(row.id || "").trim(),
+    nombre_servicio: String(row.nombre_servicio || "").trim(),
+    recomendaciones: String(row.recomendaciones || "").trim(),
+    titulo_reporte: String(row.titulo_reporte || "").trim(),
+    scope_visibility: normalizeServiceScopeForSupabase_(row.scope_visibility),
+    owner_usuario: String(row.owner_usuario || "").trim().toLowerCase(),
+    duracion_minutos: normalizeDurationMinutes_(row.duracion_minutos)
+  };
+}
+
+function buildServiceFieldSupabaseRow_(serviceName, fieldObj) {
+  const field = fieldObj || {};
+  return {
+    servicio: String(serviceName || "").trim(),
+    campo_nombre: String(field.nombre || "").trim(),
+    campo_etiqueta: String(field.etiqueta || "").trim(),
+    campo_tipo: String(field.tipo || "").trim().toLowerCase(),
+    opciones: String(field.opciones || "").trim()
+  };
+}
+
+function normalizeServiceNamesForSupabase_(names) {
+  const list = Array.isArray(names) ? names : [names];
+  const seen = {};
+  const out = [];
+  list.forEach(function(name) {
+    const clean = String(name || "").trim();
+    if (!clean || seen[clean]) return;
+    seen[clean] = true;
+    out.push(clean);
+  });
+  return out;
+}
+
+function deleteServiceConfigFromSupabase_(serviceNames) {
+  const names = normalizeServiceNamesForSupabase_(serviceNames);
+  for (let i = 0; i < names.length; i++) {
+    const res = supabaseRestRequest_("delete", "config_campos", {
+      filters: { servicio: names[i] }
+    });
+    if (res && !res.success && !res.skipped) return res;
+    if (res && res.skipped) return res;
+  }
+  return { success: true };
+}
+
+function deleteServiceRecordFromSupabase_(idServicio, serviceName) {
+  const id = String(idServicio || "").trim();
+  const name = String(serviceName || "").trim();
+  if (!id && !name) return { success: false, message: "Servicio sin referencia para eliminar." };
+  return id
+    ? supabaseRestRequest_("delete", "servicios", { filters: { id: id } })
+    : supabaseRestRequest_("delete", "servicios", { filters: { nombre_servicio: name } });
+}
+
+function syncServiceFullToSupabase_(serviceObj, fieldList, previousServiceNames) {
+  const serviceRow = buildServiceSupabaseRow_(serviceObj);
+  if (!serviceRow.id || !serviceRow.nombre_servicio) {
+    return { success: false, message: "Servicio sin datos clave para sincronizar." };
+  }
+
+  const deleteServiceRes = deleteServiceRecordFromSupabase_(serviceRow.id, serviceRow.nombre_servicio);
+  if (deleteServiceRes && !deleteServiceRes.success && !deleteServiceRes.skipped) return deleteServiceRes;
+  if (deleteServiceRes && deleteServiceRes.skipped) return deleteServiceRes;
+
+  const insertServiceRes = supabaseRestRequest_("post", "servicios", {
+    prefer: "return=representation",
+    body: serviceRow
+  });
+  if (insertServiceRes && !insertServiceRes.success && !insertServiceRes.skipped) return insertServiceRes;
+  if (insertServiceRes && insertServiceRes.skipped) return insertServiceRes;
+
+  const deleteRes = deleteServiceConfigFromSupabase_(
+    normalizeServiceNamesForSupabase_((previousServiceNames || []).concat([serviceRow.nombre_servicio]))
+  );
+  if (deleteRes && !deleteRes.success && !deleteRes.skipped) return deleteRes;
+  if (deleteRes && deleteRes.skipped) return deleteRes;
+
+  const rows = [];
+  if (Array.isArray(fieldList)) {
+    fieldList.forEach(function(field) {
+      const row = buildServiceFieldSupabaseRow_(serviceRow.nombre_servicio, field);
+      if (!row.campo_nombre) return;
+      rows.push(row);
+    });
+  }
+  if (!rows.length) return { success: true };
+
+  return supabaseRestRequest_("post", "config_campos", {
+    prefer: "return=representation",
+    body: rows
+  });
+}
+
+function deleteServiceFromSupabase_(idServicio, serviceName) {
+  const deleteRes = deleteServiceRecordFromSupabase_(idServicio, serviceName);
+  if (deleteRes && !deleteRes.success && !deleteRes.skipped) return deleteRes;
+  if (deleteRes && deleteRes.skipped) return deleteRes;
+
+  return deleteServiceConfigFromSupabase_([serviceName]);
+}
+
+function diagnosisDateToIsoString_(value) {
+  if (!value) return "";
+  if (value instanceof Date) {
+    try { return value.toISOString(); } catch (e) {}
+  }
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const parsed = new Date(raw);
+  if (!isNaN(parsed.getTime())) {
+    try { return parsed.toISOString(); } catch (e) {}
+  }
+  return raw;
+}
+
+function buildDiagnosisSupabaseRow_(record) {
+  const row = record || {};
+  return {
+    id_reporte: String(row.id_reporte || "").trim(),
+    id_paciente: String(row.id_paciente || "").trim(),
+    tipo_examen: String(row.tipo_examen || "").trim(),
+    fecha: diagnosisDateToIsoString_(row.fecha),
+    datos_json: String(row.datos_json || "").trim(),
+    pdf_url: String(row.pdf_url || "").trim(),
+    creado_por: String(row.creado_por || "").trim()
+  };
+}
+
+function syncDiagnosisToSupabase_(record) {
+  const row = buildDiagnosisSupabaseRow_(record);
+  if (!row.id_reporte) {
+    return { success: false, message: "Diagnostico sin id_reporte." };
+  }
+
+  const deleteRes = supabaseRestRequest_("delete", "diagnosticos_archivos", {
+    filters: { id_reporte: row.id_reporte }
+  });
+  if (deleteRes && !deleteRes.success && !deleteRes.skipped) return deleteRes;
+  if (deleteRes && deleteRes.skipped) return deleteRes;
+
+  return supabaseRestRequest_("post", "diagnosticos_archivos", {
+    prefer: "return=representation",
+    body: row
+  });
+}
+
+function deleteDiagnosisFromSupabase_(idReporte) {
+  const id = String(idReporte || "").trim();
+  if (!id) return { success: false, message: "id_reporte faltante." };
+  return supabaseRestRequest_("delete", "diagnosticos_archivos", {
+    filters: { id_reporte: id }
+  });
+}
+
+function supabaseDateText_(value) {
+  if (value === undefined || value === null || value === "") return "";
+  return toIsoDate(value);
+}
+
+function supabaseNullableText_(value, options) {
+  const opts = options || {};
+  let txt = String(value === undefined || value === null ? "" : value).trim();
+  if (!txt) return null;
+  if (opts.lowercase) txt = txt.toLowerCase();
+  if (opts.uppercase) txt = txt.toUpperCase();
+  return txt;
+}
+
+function supabaseNullableDateText_(value) {
+  const txt = supabaseDateText_(value);
+  return txt ? txt : null;
+}
+
+function supabaseNullableIsoString_(value) {
+  const txt = diagnosisDateToIsoString_(value);
+  return txt ? txt : null;
+}
+
+function normalizeSheetFlagForSupabase_(value, fallback) {
+  const defaultValue = fallback === undefined ? false : !!fallback;
+  if (value === undefined || value === null || value === "") return defaultValue ? "SI" : "NO";
+  if (value === true || value === 1) return "SI";
+  if (value === false || value === 0) return "NO";
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return defaultValue ? "SI" : "NO";
+  if (raw === "si" || raw === "true" || raw === "1" || raw === "yes" || raw === "on") return "SI";
+  if (raw === "no" || raw === "false" || raw === "0" || raw === "off") return "NO";
+  return defaultValue ? "SI" : "NO";
+}
+
+function buildPatientSupabaseRow_(record) {
+  const row = record || {};
+  return {
+    id_paciente: String(row.id_paciente || "").trim(),
+    cedula: supabaseNullableText_(row.cedula),
+    nombre_completo: supabaseNullableText_(row.nombre_completo),
+    fecha_nacimiento: supabaseNullableDateText_(row.fecha_nacimiento),
+    telefono: supabaseNullableText_(row.telefono),
+    correo: supabaseNullableText_(row.correo, { lowercase: true }),
+    direccion: supabaseNullableText_(row.direccion),
+    ocupacion: supabaseNullableText_(row.ocupacion),
+    antecedentes_medicos: supabaseNullableText_(row.antecedentes_medicos),
+    fecha_registro: supabaseNullableDateText_(row.fecha_registro),
+    password: supabaseNullableText_(row.password),
+    creado_por: supabaseNullableText_(row.creado_por, { lowercase: true }),
+    first_login: normalizeSheetFlagForSupabase_(row.first_login, false)
+  };
+}
+
+function syncPatientToSupabase_(record) {
+  const row = buildPatientSupabaseRow_(record);
+  if (!row.id_paciente) {
+    return { success: false, message: "Paciente sin id_paciente." };
+  }
+  return supabaseRestRequest_("post", "pacientes", {
+    onConflict: "id_paciente",
+    prefer: "resolution=merge-duplicates,return=representation",
+    body: row
+  });
+}
+
+function deletePatientFromSupabase_(idPaciente) {
+  const id = String(idPaciente || "").trim();
+  if (!id) return { success: false, message: "id_paciente faltante." };
+  return supabaseRestRequest_("delete", "pacientes", {
+    filters: { id_paciente: id }
+  });
+}
+
+function buildAdminUserSupabaseRow_(record) {
+  const row = record || {};
+  const correoNotif = String(row.correo_notificaciones || row.correo || "").trim().toLowerCase();
+  const correo = String(row.correo || row.correo_notificaciones || "").trim().toLowerCase();
+  const role = String(row.rol || row.ocupacion || "DOCTOR").trim().toUpperCase();
+  return {
+    usuario: String(row.usuario || "").trim().toLowerCase(),
+    nombre_doctor: String(row.nombre_doctor || row.nombre || "").trim(),
+    password: String(row.password || "").trim(),
+    rol: role,
+    ocupacion: String(row.ocupacion || row.rol || "DOCTOR").trim().toUpperCase(),
+    correo_notificaciones: correoNotif,
+    correo: correo,
+    telefono: String(row.telefono || "").trim(),
+    first_login: normalizeSheetFlagForSupabase_(row.first_login, false),
+    registro_sanitario: String(row.registro_sanitario || "").trim(),
+    usar_firma_virtual: normalizeSheetFlagForSupabase_(row.usar_firma_virtual, true)
+  };
+}
+
+function syncAdminUserToSupabase_(record) {
+  const row = buildAdminUserSupabaseRow_(record);
+  if (!row.usuario) {
+    return { success: false, message: "Usuario admin sin usuario." };
+  }
+  return supabaseRestRequest_("post", "usuarios_admin", {
+    onConflict: "usuario",
+    prefer: "resolution=merge-duplicates,return=representation",
+    body: row
+  });
+}
+
+function deleteAdminUserFromSupabase_(usuario) {
+  const user = String(usuario || "").trim().toLowerCase();
+  if (!user) return { success: false, message: "usuario faltante." };
+  return supabaseRestRequest_("delete", "usuarios_admin", {
+    filters: { usuario: user }
+  });
+}
+
+function buildSuperadminUserSupabaseRow_(record) {
+  const row = record || {};
+  return {
+    usuario: String(row.usuario || "").trim().toLowerCase(),
+    nombre: String(row.nombre || "").trim(),
+    password: String(row.password || "").trim(),
+    correo: String(row.correo || "").trim().toLowerCase(),
+    telefono: String(row.telefono || "").trim()
+  };
+}
+
+function syncSuperadminUserToSupabase_(record) {
+  const row = buildSuperadminUserSupabaseRow_(record);
+  if (!row.usuario) {
+    return { success: false, message: "Superadmin sin usuario." };
+  }
+  return supabaseRestRequest_("post", "usuarios_superadmin", {
+    onConflict: "usuario",
+    prefer: "resolution=merge-duplicates,return=representation",
+    body: row
+  });
+}
+
+function deleteSuperadminUserFromSupabase_(usuario) {
+  const user = String(usuario || "").trim().toLowerCase();
+  if (!user) return { success: false, message: "usuario faltante." };
+  return supabaseRestRequest_("delete", "usuarios_superadmin", {
+    filters: { usuario: user }
+  });
+}
+
+function findSuperadminByUserInSupabase_(usuario) {
+  const user = String(usuario || "").trim().toLowerCase();
+  if (!user) return null;
+  const res = supabaseRestRequest_("get", "usuarios_superadmin", {
+    filters: { usuario: user },
+    select: "*"
+  });
+  if (!res || !res.success || !Array.isArray(res.data) || !res.data.length) return null;
+  return buildSuperadminUserSupabaseRow_(res.data[0]);
+}
+
+function buildAppointmentSupabaseRow_(record) {
+  const row = record || {};
+  return {
+    id_cita: String(row.id_cita || "").trim(),
+    id_paciente: String(row.id_paciente || "").trim(),
+    fecha: supabaseDateText_(row.fecha),
+    hora: String(row.hora || "").trim(),
+    motivo: String(row.motivo || "").trim(),
+    estado: String(row.estado || "").trim().toUpperCase(),
+    fecha_registro: diagnosisDateToIsoString_(row.fecha_registro),
+    nota_paciente: String(row.nota_paciente !== undefined ? row.nota_paciente : row.nota || "").trim(),
+    recomendaciones_serv: String(row.recomendaciones_serv !== undefined ? row.recomendaciones_serv : row.recomendaciones || "").trim(),
+    creado_por: String(row.creado_por || "").trim().toLowerCase(),
+    duracion_minutos: normalizeDurationMinutes_(row.duracion_minutos)
+  };
+}
+
+function syncAppointmentToSupabase_(record) {
+  const row = buildAppointmentSupabaseRow_(record);
+  if (!row.id_cita) {
+    return { success: false, message: "Cita sin id_cita." };
+  }
+  return supabaseRestRequest_("post", "citas", {
+    onConflict: "id_cita",
+    prefer: "resolution=merge-duplicates,return=representation",
+    body: row
+  });
+}
+
+function deleteAppointmentFromSupabase_(idCita) {
+  const id = String(idCita || "").trim();
+  if (!id) return { success: false, message: "id_cita faltante." };
+  return supabaseRestRequest_("delete", "citas", {
+    filters: { id_cita: id }
+  });
+}
+
+function buildClinicalHistorySupabaseRow_(record) {
+  const row = record || {};
+  return {
+    id_paciente: String(row.id_paciente || "").trim(),
+    app: supabaseNullableText_(row.app),
+    apf: supabaseNullableText_(row.apf),
+    alergias: supabaseNullableText_(row.alergias),
+    aqx: supabaseNullableText_(row.aqx),
+    menarquia: supabaseNullableText_(row.menarquia),
+    prs: supabaseNullableText_(row.prs),
+    num_parejas: supabaseNullableText_(row.num_parejas),
+    ago_g: supabaseNullableText_(row.ago_g),
+    ago_p: supabaseNullableText_(row.ago_p),
+    ago_c: supabaseNullableText_(row.ago_c),
+    ago_a: supabaseNullableText_(row.ago_a),
+    fecha_aborto: supabaseNullableDateText_(row.fecha_aborto || row.fecha_ultimo_evento),
+    pap: supabaseNullableText_(row.pap),
+    fum: supabaseNullableDateText_(row.fum),
+    anticonceptivos: supabaseNullableText_(row.anticonceptivos),
+    tipo_anti: supabaseNullableText_(row.tipo_anti),
+    tiempo_uso: supabaseNullableText_(row.tiempo_uso),
+    tipo_ultimo: supabaseNullableText_(row.tipo_ultimo),
+    fecha_actualizacion: supabaseNullableIsoString_(row.fecha_actualizacion)
+  };
+}
+
+function syncClinicalHistoryToSupabase_(record) {
+  const row = buildClinicalHistorySupabaseRow_(record);
+  if (!row.id_paciente) {
+    return { success: false, message: "Historia clinica sin id_paciente." };
+  }
+  return supabaseRestRequest_("post", "historia_clinica", {
+    onConflict: "id_paciente",
+    prefer: "resolution=merge-duplicates,return=representation",
+    body: row
+  });
+}
+
+function buildPatientEvolutionSupabaseRow_(record) {
+  const row = record || {};
+  return {
+    id_evolucion: String(row.id_evolucion || "").trim(),
+    id_paciente: String(row.id_paciente || "").trim(),
+    fecha_consulta: diagnosisDateToIsoString_(row.fecha_consulta),
+    motivo_consulta: String(row.motivo_consulta || "").trim(),
+    evolucion: String(row.evolucion || "").trim(),
+    diagnostico: String(row.diagnostico || "").trim(),
+    tratamiento: String(row.tratamiento || "").trim(),
+    sugerencias: String(row.sugerencias || "").trim(),
+    creado_por: String(row.creado_por || "").trim().toLowerCase(),
+    fecha_actualizacion: diagnosisDateToIsoString_(row.fecha_actualizacion)
+  };
+}
+
+function syncPatientEvolutionToSupabase_(record) {
+  const row = buildPatientEvolutionSupabaseRow_(record);
+  if (!row.id_evolucion) {
+    return { success: false, message: "Evolucion sin id_evolucion." };
+  }
+  return supabaseRestRequest_("post", "evolucion_paciente", {
+    onConflict: "id_evolucion",
+    prefer: "resolution=merge-duplicates,return=representation",
+    body: row
+  });
+}
+
+function deletePatientEvolutionFromSupabase_(idEvolucion) {
+  const id = String(idEvolucion || "").trim();
+  if (!id) return { success: false, message: "id_evolucion faltante." };
+  return supabaseRestRequest_("delete", "evolucion_paciente", {
+    filters: { id_evolucion: id }
+  });
+}
+
+function findRow(sheetName, colName, value) {
+  const sheet = getSheet(sheetName);
+  const data = sheet.getDataRange().getValues();
+  if (data.length === 0) return null;
+  const headers = data[0];
+  const colIndex = headers.indexOf(colName);
+  if (colIndex === -1) return null;
+
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][colIndex]) === String(value)) {
+      let rowObj = {};
+      for (let j = 0; j < headers.length; j++) {
+        rowObj[headers[j]] = data[i][j];
+      }
+      return rowObj;
+    }
+  }
+  return null;
+}
+
+function findRowIndex(sheet, colName, value) {
+  const data = sheet.getDataRange().getValues();
+  if (data.length === 0) return -1;
+  const headers = data[0];
+  const colIndex = headers.indexOf(colName);
+  if (colIndex === -1) return -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][colIndex]) === String(value)) return i + 1;
+  }
+  return -1;
+}
+
+function getTableData(sheetName) {
+  const sheet = getSheet(sheetName);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const headers = data[0];
+  let result = [];
+  for (let i = 1; i < data.length; i++) {
+    let rowObj = {};
+    for (let j = 0; j < headers.length; j++) {
+      rowObj[headers[j]] = data[i][j];
+    }
+    result.push(rowObj);
+  }
+  return result;
+}
+
+// ==========================================
+// 2. GESTIÓN DE PACIENTES (CRUD)
+// ==========================================
+
+function createRecord(sheetName, dataObj) {
+  // 1. OBTENER EL CANDADO (LOCK)
+  const lock = LockService.getScriptLock();
+
+  try {
+    // Intentamos bloquear el script por 10 segundos.
+    lock.waitLock(10000);
+  } catch (e) {
+    return { success: false, message: "El servidor está ocupado. Inténtalo de nuevo en unos segundos." };
+  }
+
+  // 2. EJECUTAR LA LÓGICA DE GUARDADO (DENTRO DEL BLOQUEO)
+  try {
+    const sheet = getSheet(sheetName);
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    
+    // Mapeamos los datos según el orden de las columnas
+    let newRow = headers.map(header => dataObj[header] || "");
+    let warningMessage = "";
+    
+    // Insertamos la fila
+    sheet.appendRow(newRow);
+    
+    // Forzamos formato texto para evitar que Excel cambie fechas o números
+    const lastRow = sheet.getLastRow();
+    const range = sheet.getRange(lastRow, 1, 1, headers.length);
+    range.setNumberFormat('@'); 
+    range.setValues([newRow]); 
+    
+    // --- LÓGICA DE CARPETAS (Se mantiene igual, pero protegida) ---
+    if (sheetName === "pacientes") {
+        try {
+            const rootFolder = getFolder(DRIVE_ROOT_FOLDER);
+            const folderName = `${dataObj.nombre_completo}_${dataObj.id_paciente}`;
+            getFolder(folderName, rootFolder);
+            
+        } catch(e) {
+            console.log("Advertencia: No se pudo crear la carpeta inicial. " + e.toString());
+        }
+
+        const savedRow = {};
+        headers.forEach(function(header, idx) {
+          savedRow[header] = newRow[idx];
+        });
+        const syncRes = syncPatientToSupabase_(savedRow);
+        if (syncRes && !syncRes.success && !syncRes.skipped) {
+          warningMessage = syncRes.message || "No se pudo sincronizar con Supabase.";
+        }
+    }
+
+    return warningMessage
+      ? {
+          success: true,
+          message: "Guardado correctamente. Advertencia: no se pudo sincronizar con Supabase.",
+          warning: warningMessage
+        }
+      : { success: true, message: "Guardado correctamente" };
+
+  } catch (error) {
+    return { success: false, message: "Error crítico: " + error.toString() };
+
+  } finally {
+    lock.releaseLock(); 
+  }
+}
+
+function updateRecord(sheetName, idValue, dataObj) {
+  const sheet = getSheet(sheetName);
+  const rowIndex = findRowIndex(sheet, "id_paciente", idValue);
+  if (rowIndex === -1) return { success: false, message: "ID no encontrado" };
+  
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  headers.forEach((header, colIndex) => {
+    if (dataObj[header] !== undefined) {
+      const cell = sheet.getRange(rowIndex, colIndex + 1);
+      cell.setNumberFormat('@'); 
+      cell.setValue(dataObj[header]);
+    }
+  });
+
+  if (sheetName === "pacientes") {
+    const updatedRow = findRow(sheetName, "id_paciente", idValue);
+    const syncRes = syncPatientToSupabase_(updatedRow || {});
+    if (syncRes && !syncRes.success && !syncRes.skipped) {
+      return {
+        success: true,
+        message: "Actualizado correctamente. Advertencia: no se pudo sincronizar con Supabase.",
+        warning: syncRes.message || "No se pudo sincronizar con Supabase."
+      };
+    }
+  }
+
+  return { success: true, message: "Actualizado correctamente" };
+}
+// Compatibilidad: borrar servicio por ID (también limpia config_campos)
+function deleteService(idServicio) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+    const sheetServ = getSheet("servicios");
+    const sheetCampos = ensureServiceConfigSheetHeaders_().sheet;
+
+    const dataServ = sheetServ.getDataRange().getValues();
+    let nombreServicio = "";
+    let rowIndex = -1;
+    let serviceId = "";
+    for (let i = 1; i < dataServ.length; i++) {
+      if (String(dataServ[i][0]).trim() === String(idServicio).trim()) {
+        serviceId = String(dataServ[i][0] || "").trim();
+        nombreServicio = String(dataServ[i][1] || "").trim();
+        rowIndex = i + 1;
+        break;
+      }
+    }
+    if (rowIndex === -1 || !nombreServicio) {
+      return { success: false, message: "Servicio no encontrado." };
+    }
+
+    // 1. Borrar config_campos asociado al nombre del servicio
+    const dataCampos = sheetCampos.getDataRange().getValues();
+    for (let i = dataCampos.length - 1; i >= 1; i--) {
+      if (String(dataCampos[i][0]).trim() === nombreServicio) {
+        sheetCampos.deleteRow(i + 1);
+      }
+    }
+
+    // 2. Borrar fila en servicios por ID
+    sheetServ.deleteRow(rowIndex);
+
+    const syncRes = deleteServiceFromSupabase_(serviceId || idServicio, nombreServicio);
+    if (syncRes && !syncRes.success && !syncRes.skipped) {
+      return {
+        success: true,
+        message: "Servicio eliminado completamente. Advertencia: no se pudo sincronizar con Supabase.",
+        warning: syncRes.message || "No se pudo sincronizar con Supabase."
+      };
+    }
+
+    return { success: true, message: "Servicio eliminado completamente." };
+  } catch (e) {
+    return { success: false, message: e.toString() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function deleteRecord(sheetName, idValue) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(5000);
+    const sheet = getSheet(sheetName);
+    let warningMessage = "";
+    
+    // 1. Identificar columna ID según la hoja
+    let colID = "id_paciente";
+    if(sheetName === "servicios") colID = "id";
+    if(sheetName === "config_promociones") colID = "id_promo";
+
+    // 2. Buscar la fila en Excel
+    const rowIndex = findRowIndex(sheet, colID, idValue);
+    if (rowIndex === -1) return { success: false, message: "ID no encontrado" };
+    const deletedRow = sheetName === "pacientes" ? findRow(sheetName, colID, idValue) : null;
+
+    // ======================================================
+    // 3. SI ES UN PACIENTE -> BORRADO EN CASCADA (CORREGIDO)
+    // ======================================================
+    if (sheetName === "pacientes") {
+      
+      // A. BORRAR CARPETA FÍSICA EN DRIVE (Búsqueda Inteligente por ID)
+      try {
+          const rootFolders = DriveApp.getFoldersByName(DRIVE_ROOT_FOLDER);
+          if(rootFolders.hasNext()) {
+              const root = rootFolders.next();
+              const subFolders = root.getFolders();
+              const searchId = String(idValue).trim();
+
+              // Recorremos las carpetas buscando la coincidencia de ID
+              while (subFolders.hasNext()) {
+                  const folder = subFolders.next();
+                  // Si el nombre de la carpeta TERMINA con el ID (ej: "Juan Perez_12345")
+                  if (folder.getName().endsWith(searchId)) {
+                      folder.setTrashed(true); // ¡A la basura!
+                      break; // Ya la encontramos, dejamos de buscar
+                  }
+              }
+          }
+      } catch(e) { 
+          console.log("Error borrando carpeta Drive: " + e); 
+      }
+
+      // B. Borrar Historia Clínica
+      try {
+         const sheetHC = getSheet("historia_clinica");
+         const idxHC = findRowIndex(sheetHC, "id_paciente", idValue);
+         if (idxHC !== -1) sheetHC.deleteRow(idxHC);
+      } catch(e) {}
+
+      // C. Borrar Citas y Reportes (Usa los helpers que ya tienes)
+      try { deleteRowsBulk("citas", "id_paciente", idValue); } catch(e){}
+      try { deleteRowsBulk("diagnosticos_archivos", "id_paciente", idValue); } catch(e){}
+    }
+    
+    // 4. Finalmente, borrar al paciente de la lista de Excel
+    sheet.deleteRow(rowIndex);
+
+    if (sheetName === "pacientes") {
+      const syncRes = deletePatientFromSupabase_(deletedRow && deletedRow.id_paciente ? deletedRow.id_paciente : idValue);
+      if (syncRes && !syncRes.success && !syncRes.skipped) {
+        warningMessage = syncRes.message || "No se pudo sincronizar con Supabase.";
+      }
+    }
+    
+    return warningMessage
+      ? {
+          success: true,
+          message: "Paciente y todos sus datos eliminados correctamente. Advertencia: no se pudo sincronizar con Supabase.",
+          warning: warningMessage
+        }
+      : { success: true, message: "Paciente y todos sus datos eliminados correctamente." };
+
+  } catch (error) {
+    return { success: false, message: "Error al eliminar: " + error.toString() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ==========================================
+// 3. GESTIÓN DE SERVICIOS MAESTRA (Full Edición y Orden)
+// ==========================================
+
+// Obtener lista de servicios (Ahora incluye Título Reporte)
+function ensureServicesSheetHeaders_() {
+  const sheet = getSheet("servicios");
+  const required = ["id", "nombre_servicio", "recomendaciones", "titulo_reporte", "scope_visibility", "owner_usuario", "duracion_minutos"];
+
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(required);
+    return { sheet: sheet, headers: required };
+  }
+
+  const lastCol = Math.max(sheet.getLastColumn(), required.length);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  required.forEach(name => {
+    if (headers.indexOf(name) === -1) {
+      const col = sheet.getLastColumn() + 1;
+      sheet.getRange(1, col).setValue(name);
+      headers.push(name);
+    }
+  });
+
+  return { sheet: sheet, headers: headers };
+}
+
+function resolveServiceDoctorRequester_(requester) {
+  const req = String(requester || "").trim().toLowerCase();
+  if (!req) return { doctor: "", superadmin: false };
+
+  try {
+    if (typeof isSuperadminUser === "function" && isSuperadminUser(req)) {
+      return { doctor: req, superadmin: true };
+    }
+  } catch (e) {}
+
+  const admin = findRow("usuarios_admin", "usuario", req);
+  if (admin) return { doctor: req, superadmin: false };
+
+  const patient = findRow("pacientes", "id_paciente", requester);
+  if (patient) {
+    return { doctor: String(patient.creado_por || "").trim().toLowerCase(), superadmin: false };
+  }
+
+  return { doctor: req, superadmin: false };
+}
+
+function ensureServiceConfigSheetHeaders_() {
+  const sheet = getSheet("config_campos");
+  const required = ["servicio", "campo_nombre", "campo_etiqueta", "campo_tipo", "opciones"];
+
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(required);
+    return { sheet: sheet, headers: required };
+  }
+
+  const lastCol = Math.max(sheet.getLastColumn(), required.length);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  required.forEach(function(name) {
+    if (headers.indexOf(name) !== -1) return;
+    const col = sheet.getLastColumn() + 1;
+    sheet.getRange(1, col).setValue(name);
+    headers.push(name);
+  });
+
+  return { sheet: sheet, headers: headers };
+}
+
+// Obtener lista de servicios (filtrable por requester)
+function getServices(requester) {
+  const ensured = ensureServicesSheetHeaders_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+
+  const idxId = headers.indexOf("id");
+  const idxName = headers.indexOf("nombre_servicio");
+  const idxRecs = headers.indexOf("recomendaciones");
+  const idxTitle = headers.indexOf("titulo_reporte");
+  const idxScope = headers.indexOf("scope_visibility");
+  const idxOwner = headers.indexOf("owner_usuario");
+  const idxDuration = headers.indexOf("duracion_minutos");
+
+  const access = resolveServiceDoctorRequester_(requester);
+  const filterByRequester = !!String(requester || "").trim() && !access.superadmin;
+  const doctorUser = String(access.doctor || "").trim().toLowerCase();
+
+  let result = [];
+  for (let i = 1; i < data.length; i++) {
+    const nombre = idxName > -1 ? String(data[i][idxName] || "").trim() : "";
+    if (!nombre) continue;
+
+    let scope = idxScope > -1 ? String(data[i][idxScope] || "").trim().toUpperCase() : "ALL";
+    if (scope !== "OWNER" && scope !== "ALL") scope = "ALL";
+    const owner = idxOwner > -1 ? String(data[i][idxOwner] || "").trim().toLowerCase() : "";
+
+    const allowed = !filterByRequester || scope === "ALL" || (doctorUser && owner === doctorUser);
+    if (!allowed) continue;
+
+    result.push({
+      id: idxId > -1 ? data[i][idxId] : "",
+      nombre_servicio: nombre,
+      recomendaciones: idxRecs > -1 ? (data[i][idxRecs] || "") : "",
+      titulo_reporte: idxTitle > -1 ? (data[i][idxTitle] || "") : "",
+      scope_visibility: scope,
+      owner_usuario: owner,
+      duracion_minutos: idxDuration > -1 ? normalizeDurationMinutes_(data[i][idxDuration]) : 30,
+      duracion_label: idxDuration > -1 ? durationMinutesToLabel_(data[i][idxDuration]) : durationMinutesToLabel_(30)
+    });
+  }
+  return result;
+}
+
+function parseAllowedDurationMinutes_(value) {
+  const raw = String(value === undefined || value === null ? "" : value).trim();
+  if (!raw) return 0;
+  const num = Number(raw);
+  const allowed = { 30: true, 60: true, 120: true, 180: true, 240: true, 300: true };
+  return allowed[num] ? num : 0;
+}
+
+function normalizeDurationMinutes_(value) {
+  return parseAllowedDurationMinutes_(value) || 30;
+}
+
+function durationMinutesToLabel_(value) {
+  const mins = normalizeDurationMinutes_(value);
+  if (mins === 30) return "30 minutos";
+  const hours = mins / 60;
+  return hours + " hora" + (hours === 1 ? "" : "s");
+}
+
+function ensureAppointmentsSheetHeaders_() {
+  const sheet = getSheet("citas");
+  const required = [
+    "id_cita",
+    "id_paciente",
+    "fecha",
+    "hora",
+    "motivo",
+    "estado",
+    "fecha_registro",
+    "nota_paciente",
+    "recomendaciones_serv",
+    "creado_por",
+    "duracion_minutos"
+  ];
+
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(required);
+    sheet.getRange(1, 1, 1, required.length).setFontWeight("bold");
+    return { sheet: sheet, headers: required };
+  }
+
+  const lastCol = Math.max(sheet.getLastColumn(), required.length);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  required.forEach(function(name) {
+    if (headers.indexOf(name) !== -1) return;
+    const col = sheet.getLastColumn() + 1;
+    sheet.getRange(1, col).setValue(name);
+    headers.push(name);
+  });
+
+  return { sheet: sheet, headers: headers };
+}
+
+function timeTextToMinutes_(value) {
+  if (value instanceof Date) {
+    return (value.getHours() * 60) + value.getMinutes();
+  }
+
+  if (typeof value === "number" && isFinite(value)) {
+    if (value >= 0 && value < 1) {
+      return Math.round(value * 24 * 60);
+    }
+    if (value >= 0 && value < (24 * 60)) {
+      return Math.round(value);
+    }
+  }
+
+  const raw = String(value || "").trim();
+  if (!raw) return NaN;
+
+  const normalized = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (normalized) {
+    return (Number(normalized[1]) * 60) + Number(normalized[2]);
+  }
+
+  const formatted = formatTime(value);
+  if (formatted && formatted !== raw) {
+    const formattedMatch = String(formatted).match(/^(\d{1,2}):(\d{2})$/);
+    if (formattedMatch) {
+      return (Number(formattedMatch[1]) * 60) + Number(formattedMatch[2]);
+    }
+  }
+
+  const parsed = new Date(raw);
+  if (!isNaN(parsed.getTime())) {
+    return (parsed.getHours() * 60) + parsed.getMinutes();
+  }
+
+  return NaN;
+}
+
+function minutesToTimeText_(minutes) {
+  const total = Number(minutes);
+  if (!isFinite(total)) return "";
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
+}
+
+function getAgendaDayStartMinutes_() {
+  return timeTextToMinutes_("09:00");
+}
+
+function getAgendaDayEndMinutes_() {
+  return timeTextToMinutes_("17:30");
+}
+
+function getAgendaLastStartMinutes_() {
+  return getAgendaDayEndMinutes_() - 30;
+}
+
+function getAppointmentHalfHourSlotCount_(durationMinutes) {
+  return Math.max(1, Math.round(normalizeDurationMinutes_(durationMinutes) / 30));
+}
+
+function buildHalfHourSlotsFromTime_(startTime, durationMinutes) {
+  const startMinutes = timeTextToMinutes_(startTime);
+  if (!isFinite(startMinutes)) return [];
+  const count = getAppointmentHalfHourSlotCount_(durationMinutes);
+  const slots = [];
+  for (let i = 0; i < count; i++) {
+    slots.push(minutesToTimeText_(startMinutes + (i * 30)));
+  }
+  return slots;
+}
+
+function extractServiceNameFromAppointmentMotive_(motivo) {
+  const raw = String(motivo || "").trim();
+  if (!raw) return "";
+  const marker = raw.indexOf(" | Nota:");
+  if (marker > -1) return raw.substring(0, marker).trim();
+  return raw;
+}
+
+function getServiceDurationMinutesByName_(serviceName) {
+  const target = String(serviceName || "").trim();
+  if (!target) return 30;
+
+  const ensured = ensureServicesSheetHeaders_();
+  const headers = ensured.headers;
+  const idxName = headers.indexOf("nombre_servicio");
+  const idxDuration = headers.indexOf("duracion_minutos");
+  if (idxName === -1) return 30;
+
+  const data = ensured.sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idxName] || "").trim() !== target) continue;
+    return idxDuration > -1 ? normalizeDurationMinutes_(data[i][idxDuration]) : 30;
+  }
+  return 30;
+}
+
+function resolveAppointmentDurationMinutes_(dataObj) {
+  const src = dataObj || {};
+  const explicit = parseAllowedDurationMinutes_(src.duracion_minutos);
+  if (explicit) return explicit;
+
+  const serviceName = String(src.servicio_nombre || "").trim() || extractServiceNameFromAppointmentMotive_(src.motivo);
+  return getServiceDurationMinutesByName_(serviceName);
+}
+
+function getAppointmentDurationMinutesById_(idCita) {
+  const target = String(idCita || "").trim();
+  if (!target) return 30;
+
+  const ensured = ensureAppointmentsSheetHeaders_();
+  const headers = ensured.headers;
+  const idxId = headers.indexOf("id_cita");
+  const idxDuration = headers.indexOf("duracion_minutos");
+  const idxMotivo = headers.indexOf("motivo");
+  if (idxId === -1) return 30;
+
+  const data = ensured.sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idxId] || "").trim() !== target) continue;
+    return resolveAppointmentDurationMinutes_({
+      duracion_minutos: idxDuration > -1 ? data[i][idxDuration] : "",
+      motivo: idxMotivo > -1 ? data[i][idxMotivo] : ""
+    });
+  }
+  return 30;
+}
+
+function getOccupiedSlotsForDate_(dateString, options) {
+  const targetDate = String(dateString || "").trim();
+  if (!targetDate) return [];
+
+  const opts = options || {};
+  const excludeId = String(opts.exclude_cita_id || opts.appointment_id || "").trim();
+  const ensured = ensureAppointmentsSheetHeaders_();
+  const headers = ensured.headers;
+  const data = ensured.sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+
+  const idxId = headers.indexOf("id_cita");
+  const idxDate = headers.indexOf("fecha");
+  const idxTime = headers.indexOf("hora");
+  const idxMotivo = headers.indexOf("motivo");
+  const idxDuration = headers.indexOf("duracion_minutos");
+  if (idxDate === -1 || idxTime === -1) return [];
+
+  const occupied = {};
+  for (let i = 1; i < data.length; i++) {
+    const rowId = idxId > -1 ? String(data[i][idxId] || "").trim() : "";
+    if (excludeId && rowId === excludeId) continue;
+    if (toIsoDate(data[i][idxDate]) !== targetDate) continue;
+
+    const duration = resolveAppointmentDurationMinutes_({
+      duracion_minutos: idxDuration > -1 ? data[i][idxDuration] : "",
+      motivo: idxMotivo > -1 ? data[i][idxMotivo] : ""
+    });
+    const slots = buildHalfHourSlotsFromTime_(data[i][idxTime], duration);
+    slots.forEach(function(slot) {
+      occupied[slot] = true;
+    });
+  }
+
+  return Object.keys(occupied).sort();
+}
+
+function getAvailableStartSlotsForDate_(dateString, durationMinutes, options) {
+  const occupiedList = getOccupiedSlotsForDate_(dateString, options);
+  const occupiedMap = {};
+  occupiedList.forEach(function(slot) {
+    occupiedMap[slot] = true;
+  });
+
+  const dayStart = getAgendaDayStartMinutes_();
+  const lastStart = getAgendaLastStartMinutes_();
+  const dayEnd = getAgendaDayEndMinutes_();
+  const blockMinutes = getAppointmentHalfHourSlotCount_(durationMinutes) * 30;
+  const available = [];
+
+  for (let start = dayStart; start <= lastStart; start += 30) {
+    const end = start + blockMinutes;
+    if (end > dayEnd) continue;
+
+    let free = true;
+    for (let cursor = start; cursor < end; cursor += 30) {
+      if (occupiedMap[minutesToTimeText_(cursor)]) {
+        free = false;
+        break;
+      }
+    }
+    if (free) available.push(minutesToTimeText_(start));
+  }
+
+  return available;
+}
+
+function isAppointmentRangeAvailable_(dateString, startTime, durationMinutes, options) {
+  const startMinutes = timeTextToMinutes_(startTime);
+  if (!isFinite(startMinutes)) return false;
+
+  const dayStart = getAgendaDayStartMinutes_();
+  const dayEnd = getAgendaDayEndMinutes_();
+  const blockMinutes = getAppointmentHalfHourSlotCount_(durationMinutes) * 30;
+  if (startMinutes < dayStart || (startMinutes + blockMinutes) > dayEnd) return false;
+
+  const occupiedList = getOccupiedSlotsForDate_(dateString, options);
+  const occupiedMap = {};
+  occupiedList.forEach(function(slot) {
+    occupiedMap[slot] = true;
+  });
+
+  const neededSlots = buildHalfHourSlotsFromTime_(startTime, durationMinutes);
+  for (let i = 0; i < neededSlots.length; i++) {
+    if (occupiedMap[neededSlots[i]]) return false;
+  }
+  return true;
+}
+
+
+// ==========================================
+// 4. GESTIÓN DE CITAS Y HORARIOS (CORE FIX)
+// ==========================================
+
+// Obtener horas ocupadas (Bloqueo de horario)
+function getTakenSlots(dateString, options) {
+  const opts = options || {};
+  const mode = String(opts.mode || "").trim().toLowerCase();
+
+  if (mode === "available") {
+    let duration = parseAllowedDurationMinutes_(opts.duration_minutes);
+    if (!duration && opts.appointment_id) {
+      duration = getAppointmentDurationMinutesById_(opts.appointment_id);
+    }
+    return getAvailableStartSlotsForDate_(dateString, duration || 30, {
+      exclude_cita_id: opts.exclude_cita_id || opts.appointment_id || ""
+    });
+  }
+
+  return getOccupiedSlotsForDate_(dateString, opts);
+}
+
+// PARA INCLUIR TELÉFONO EN LA AGENDA
+
+function getAppointmentsByDate(dateString) {
+  const ensured = ensureAppointmentsSheetHeaders_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+
+  const idxDuration = headers.indexOf("duracion_minutos");
+  
+  let result = [];
+  const pacientes = getTableData("pacientes"); 
+  
+  for (let i = 1; i < data.length; i++) {
+    const rowDateClean = toIsoDate(data[i][2]);
+    
+    if (rowDateClean === dateString) {
+      const p = pacientes.find(px => String(px.id_paciente) === String(data[i][1]));
+      result.push({
+        id_cita: data[i][0],
+        id_paciente: data[i][1],
+        nombre_paciente: p ? p.nombre_completo : "Desconocido",
+        telefono: p ? p.telefono : "",
+        fecha: rowDateClean,
+        hora: formatTime(data[i][3]),
+        motivo: data[i][4],
+        estado: data[i][5],
+        
+        // --- CORRECCIÓN: AGREGAMOS LA NOTA Y RECOMENDACIÓN ---
+        nota: data[i][7] || "", // Columna H (índice 7)
+        recomendaciones: data[i][8] || "", // Columna I (índice 8)
+        duracion_minutos: idxDuration > -1 ? normalizeDurationMinutes_(data[i][idxDuration]) : 30
+      });
+    }
+  }
+  return result.sort((a, b) => a.hora.localeCompare(b.hora));
+}
+
+// Obtener Citas por Paciente (Para el Expediente Clínico)
+function getPatientAppointments(patientId) {
+  return buildPatientAppointmentsList_(patientId);
+}
+
+function updateAppointmentStatus(idCita, nuevoEstado) {
+  const sheet = getSheet("citas");
+  const rowIndex = findRowIndex(sheet, "id_cita", idCita);
+  if (rowIndex === -1) return { success: false, message: "Cita no encontrada" };
+  
+  // Columna Estado es la 6 (F) - (Indices: 0,1,2,3,4,5)
+  // id, id_pac, fecha, hora, motivo, ESTADO
+  sheet.getRange(rowIndex, 6).setValue(nuevoEstado);
+  const response = { success: true, message: "Estado actualizado" };
+  const syncRes = syncAppointmentToSupabase_(findRow("citas", "id_cita", idCita) || {
+    id_cita: idCita,
+    estado: nuevoEstado
+  });
+  if (syncRes && !syncRes.success && !syncRes.skipped) {
+    response.warning = syncRes.message || "No se pudo sincronizar con Supabase.";
+    response.message = "Estado actualizado. Advertencia: no se pudo sincronizar con Supabase.";
+  }
+  return response;
+}
+// funcion para devolver el telefono
+// Database.gs - CORRECCIÓN DE GUARDADO DE CITAS
+
+function scheduleAppointment(dataObj) {
+  const ensured = ensureAppointmentsSheetHeaders_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const durationMinutes = resolveAppointmentDurationMinutes_(dataObj);
+  if (!isAppointmentRangeAvailable_(dataObj.fecha, dataObj.hora, durationMinutes)) {
+    return { success: false, message: "Ese horario ya no esta disponible para la duracion del servicio seleccionado." };
+  }
+
+  const idCita = "C-" + new Date().getTime();
+  
+  // Buscar datos del paciente para el correo
+  const paciente = findRow("pacientes", "id_paciente", dataObj.id_paciente);
+  const correoPaciente = paciente ? paciente.correo : "";
+  const nombrePaciente = paciente ? paciente.nombre_completo : "Estimado Paciente";
+  const telefonoPaciente = paciente ? paciente.telefono : "";
+  
+  const fechaRegistro = new Date();
+  const createdBy = dataObj.creado_por || "DOCTOR"; 
+  
+  // 2. GUARDAR DATOS EN COLUMNAS SEPARADAS
+  const newRow = new Array(headers.length).fill("");
+  const idxId = headers.indexOf("id_cita");
+  const idxPatient = headers.indexOf("id_paciente");
+  const idxDate = headers.indexOf("fecha");
+  const idxTime = headers.indexOf("hora");
+  const idxReason = headers.indexOf("motivo");
+  const idxState = headers.indexOf("estado");
+  const idxCreatedAt = headers.indexOf("fecha_registro");
+  const idxNote = headers.indexOf("nota_paciente");
+  const idxRecs = headers.indexOf("recomendaciones_serv");
+  const idxOwner = headers.indexOf("creado_por");
+  const idxDuration = headers.indexOf("duracion_minutos");
+
+  if (idxId > -1) newRow[idxId] = idCita;
+  if (idxPatient > -1) newRow[idxPatient] = dataObj.id_paciente;
+  if (idxDate > -1) newRow[idxDate] = dataObj.fecha;
+  if (idxTime > -1) newRow[idxTime] = dataObj.hora;
+  if (idxReason > -1) newRow[idxReason] = dataObj.motivo;
+  if (idxState > -1) newRow[idxState] = "PENDIENTE";
+  if (idxCreatedAt > -1) newRow[idxCreatedAt] = fechaRegistro;
+  if (idxNote > -1) newRow[idxNote] = dataObj.nota || "";
+  if (idxRecs > -1) newRow[idxRecs] = dataObj.recomendaciones || "";
+  if (idxOwner > -1) newRow[idxOwner] = createdBy;
+  if (idxDuration > -1) newRow[idxDuration] = durationMinutes;
+  
+  sheet.appendRow(newRow);
+  
+  // Enviar correo (sin cambios)
+  let doctorInfo = { email: "", name: "", phone: "" };
+  try {
+      if (createdBy === "DOCTOR" && correoPaciente && correoPaciente.includes("@")) {
+          sendAppointmentEmailToPatient(correoPaciente, nombrePaciente, dataObj, idCita);
+      }
+      // Si el paciente agenda, notificar al médico propietario
+      if (createdBy !== "DOCTOR") {
+          doctorInfo = getDoctorContactForPatient_(paciente);
+          sendAppointmentEmailToDoctor(doctorInfo.email, doctorInfo.name, nombrePaciente, telefonoPaciente, dataObj, idCita, false);
+      }
+  } catch(e) { console.log("Error enviando correo: " + e); }
+
+  const response = { 
+      success: true, 
+      message: "Cita procesada correctamente.", 
+      telefono: telefonoPaciente, 
+      nombre: nombrePaciente,
+      doctor_phone: doctorInfo.phone || "",
+      duracion_minutos: durationMinutes
+  };
+  const syncRes = syncAppointmentToSupabase_(findRow("citas", "id_cita", idCita) || {
+    id_cita: idCita,
+    id_paciente: dataObj.id_paciente,
+    fecha: dataObj.fecha,
+    hora: dataObj.hora,
+    motivo: dataObj.motivo,
+    estado: "PENDIENTE",
+    fecha_registro: fechaRegistro,
+    nota_paciente: dataObj.nota || "",
+    recomendaciones_serv: dataObj.recomendaciones || "",
+    creado_por: createdBy,
+    duracion_minutos: durationMinutes
+  });
+  if (syncRes && !syncRes.success && !syncRes.skipped) {
+    response.warning = syncRes.message || "No se pudo sincronizar con Supabase.";
+    response.message = "Cita procesada correctamente. Advertencia: no se pudo sincronizar con Supabase.";
+  }
+  return response;
+}
+
+function buildPatientAppointmentsList_(patientId) {
+  const ensured = ensureAppointmentsSheetHeaders_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+
+  const idxDuration = headers.indexOf("duracion_minutos");
+  let result = [];
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][1]) === String(patientId)) {
+      result.push({
+        id_cita: data[i][0],
+        fecha: toIsoDate(data[i][2]),
+        hora: formatTime(data[i][3]),
+        motivo: data[i][4],
+        estado: data[i][5],
+        // Leemos la nota del paciente (índice 7) y recomendación (índice 8)
+        nota: data[i][7], 
+        recomendaciones: data[i][8],
+        duracion_minutos: idxDuration > -1 ? normalizeDurationMinutes_(data[i][idxDuration]) : 30
+      });
+    }
+  }
+  // Ordenar por fecha más cercana primero (Ascendente)
+  return result.sort((a, b) => {
+      if (a.fecha === b.fecha) return a.hora.localeCompare(b.hora);
+      return a.fecha.localeCompare(b.fecha);
+  });
+}
+
+// Actualizamos la LECTURA para que lea las columnas correctas
+function getPatientAppointments(patientId) {
+  return buildPatientAppointmentsList_(patientId);
+}
+
+// ==========================================
+// 5. ESTADÍSTICAS DASHBOARD (FIX CONTEO)
+// ==========================================
+
+function getWeeklyStats() {
+  const sheet = getSheet("citas");
+  const data = sheet.getDataRange().getValues();
+  
+  if (data.length <= 1) return { citas_hoy: 0, citas_semana: 0 };
+  
+  const today = new Date();
+  const todayStr = toIsoDate(today); // FIX: Usar triturador
+
+  // Calcular Lunes de esta semana
+  const d = new Date(today);
+  const day = d.getDay(); 
+  const diff = d.getDate() - day + (day == 0 ? -6 : 1); 
+  const monday = new Date(d.setDate(diff)); monday.setHours(0,0,0,0);
+  
+  // Sábado
+  const saturday = new Date(monday); saturday.setDate(monday.getDate() + 5); saturday.setHours(23,59,59,999);
+  
+  let countWeek = 0;
+  let countToday = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    // FIX: Aplicamos toIsoDate para limpiar lo que viene de Excel
+    const rowDateStr = toIsoDate(data[i][2]);
+    
+    // Contar Hoy
+    if (rowDateStr === todayStr) countToday++;
+    
+    // Contar Semana
+    const parts = rowDateStr.split('-');
+    if(parts.length === 3) {
+       // Crear objeto fecha seguro (Mes base 0)
+       const rowDateObj = new Date(parts[0], parts[1]-1, parts[2]);
+       rowDateObj.setHours(12,0,0,0); // Poner hora media para evitar bordes
+       
+       if (rowDateObj >= monday && rowDateObj <= saturday) {
+         countWeek++;
+       }
+    }
+  }
+  
+  return { citas_hoy: countToday, citas_semana: countWeek };
+}
+
+// ==========================================
+// 6. PLANTILLAS DE CORREO
+// ==========================================
+
+function sendAppointmentEmailToPatient(email, nombre, dataObj, idCita) {
+  if (!areEmailsEnabled_()) return;
+  let recomendacionesHTML = "";
+  if (dataObj.recomendaciones) {
+      recomendacionesHTML = `
+        <div style="background-color: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <h4 style="margin-top: 0; margin-bottom: 10px;">⚠️ Recomendaciones:</h4>
+            <p style="margin: 0; font-style: italic;">${dataObj.recomendaciones}</p>
+        </div>
+      `;
+  }
+
+  const mensajeHTML = `
+    <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-radius: 10px; overflow: hidden;">
+      <div style="background-color: #36235d; padding: 20px; text-align: center;">
+        <h2 style="color: white; margin: 0;">VIDAFEM</h2>
+        <p style="color: #b5b3da; margin: 5px 0;">Consultorio Gineco-Obstétrico</p>
+      </div>
+      <div style="padding: 20px;">
+        <h3>Hola, ${nombre}</h3>
+        <p>Tu cita ha sido agendada correctamente.</p>
+        <div style="background-color: #f9f9f9; padding: 15px; border-left: 5px solid #bd9cc9; margin: 20px 0;">
+          <p><strong>📅 Fecha:</strong> ${dataObj.fecha}</p>
+          <p><strong>⏰ Hora:</strong> ${dataObj.hora}</p>
+          <p><strong>📍 Lugar:</strong> Consultorio VIDAFEM Cdla. La Garzota.  Av. Agustín Freire Icaza, diagonal a la Unidad Educativa Provincia de Tungurahua a 2 min del terminal terrestre </p>
+        </div>
+        ${recomendacionesHTML}
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="https://wa.me/593997330933?text=Confirmo mi cita ${idCita}" style="background-color: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-right: 10px;">✅ Confirmar</a>
+          <a href="https://wa.me/593997330933?text=Deseo reagendar mi cita ${idCita}" style="background-color: #ffc107; color: #333; padding: 10px 20px; text-decoration: none; border-radius: 5px;">🔄 Reagendar</a>
+        </div>
+      </div>
+    </div>
+  `;
+  MailApp.sendEmail({ to: email, subject: "Cita Confirmada - VIDAFEM", htmlBody: mensajeHTML });
+}
+
+// Email al médico cuando el paciente agenda o reagenda
+function sendAppointmentEmailToDoctor(doctorEmail, doctorName, patientName, patientPhone, dataObj, idCita, isReschedule) {
+  if (!areEmailsEnabled_()) return;
+  if (!doctorEmail || doctorEmail.indexOf("@") === -1) return;
+
+  const actionTitle = isReschedule ? "Cita Reagendada por Paciente" : "Nueva Cita Agendada por Paciente";
+  const waLink = buildWhatsappLink_(patientPhone, dataObj.fecha, dataObj.hora);
+  const waButton = waLink ? `
+      <div style="text-align:center; margin: 25px 0;">
+        <a href="${waLink}" style="background-color:#25D366; color:white; padding:10px 18px; text-decoration:none; border-radius:6px; display:inline-block;">
+          Enviar mensaje por WhatsApp
+        </a>
+      </div>` : "";
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-radius: 10px; overflow: hidden;">
+      <div style="background-color: #36235d; padding: 20px; text-align: center;">
+        <h2 style="color: white; margin: 0;">VIDAFEM</h2>
+        <p style="color: #b5b3da; margin: 5px 0;">${actionTitle}</p>
+      </div>
+      <div style="padding: 20px;">
+        <h3>Hola, ${doctorName || "Doctor/a"}</h3>
+        <p>Paciente: <strong>${patientName || "Sin nombre"}</strong></p>
+        <p>Teléfono: <strong>${patientPhone || "Sin teléfono"}</strong></p>
+        <div style="background-color: #f9f9f9; padding: 15px; border-left: 5px solid #bd9cc9; margin: 20px 0;">
+          <p><strong>📅 Fecha:</strong> ${dataObj.fecha}</p>
+          <p><strong>⏰ Hora:</strong> ${dataObj.hora}</p>
+          <p><strong>🩺 Motivo:</strong> ${dataObj.motivo || ""}</p>
+          <p><strong>👩‍⚕️ Médico:</strong> ${doctorName || "VIDAFEM"}</p>
+        </div>
+        ${waButton}
+        <small>ID Cita: ${idCita}</small>
+      </div>
+    </div>
+  `;
+  MailApp.sendEmail({ to: doctorEmail, subject: "Notificación de Cita - VIDAFEM", htmlBody: html });
+}
+
+function buildWhatsappLink_(phone, fecha, hora) {
+  const num = normalizePhone_(phone);
+  if (!num) return "";
+  const msg = `Gracias por agendar con nosotros te esperamos ${fecha} ${hora}`;
+  return "https://wa.me/" + num + "?text=" + encodeURIComponent(msg);
+}
+
+function normalizePhone_(phone) {
+  if (!phone) return "";
+  let digits = String(phone).replace(/[^\d]/g, "");
+  if (!digits) return "";
+  // Si empieza con 0 y tiene 10 dígitos, asumimos Ecuador (+593)
+  if (digits.length === 10 && digits.charAt(0) === "0") {
+    digits = "593" + digits.substring(1);
+  }
+  // Si tiene 9 dígitos, asumimos Ecuador (+593)
+  if (digits.length === 9) {
+    digits = "593" + digits;
+  }
+  return digits;
+}
+
+function getDoctorContactForPatient_(patientRow) {
+  try {
+    const createdBy = patientRow ? patientRow.creado_por : "";
+    if (!createdBy) {
+      return getDefaultDoctorContact_();
+    }
+    const doctor = findRow("usuarios_admin", "usuario", createdBy);
+    if (!doctor) {
+      return getDefaultDoctorContact_() || { email: "", name: createdBy };
+    }
+    const email = doctor.correo_notificaciones || doctor.correo || "";
+    const name = doctor.nombre_doctor || doctor.nombre || createdBy;
+    const phone = doctor.telefono || "";
+    if (!email) {
+      const fallback = getDefaultDoctorContact_();
+      return fallback || { email: "", name: name, phone: phone };
+    }
+    return { email: String(email || "").trim(), name: String(name || "").trim(), phone: String(phone || "").trim() };
+  } catch (e) {
+    return { email: "", name: "" };
+  }
+}
+
+function getDefaultDoctorContact_() {
+  try {
+    const sheet = getSheet("usuarios_admin");
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return { email: "", name: "" };
+    const headers = data[0];
+    const idxEmail = headers.indexOf("correo_notificaciones");
+    const idxName = headers.indexOf("nombre_doctor");
+    const idxPhone = headers.indexOf("telefono");
+    const row = data[1];
+    const email = idxEmail > -1 ? row[idxEmail] : "";
+    const name = idxName > -1 ? row[idxName] : "";
+    const phone = idxPhone > -1 ? row[idxPhone] : "";
+    return { email: String(email || "").trim(), name: String(name || "").trim(), phone: String(phone || "").trim() };
+  } catch (e) {
+    return { email: "", name: "" };
+  }
+}
+// --- FUNCIÓN DE REAGENDAMIENTO 1.2 ---
+function rescheduleAppointment(dataObj) {
+  const ensured = ensureAppointmentsSheetHeaders_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const rowIndex = findRowIndex(sheet, "id_cita", dataObj.id_cita);
+  
+  if (rowIndex === -1) return { success: false, message: "Cita no encontrada." };
+
+  const idxReason = headers.indexOf("motivo");
+  const idxDuration = headers.indexOf("duracion_minutos");
+  const currentRow = sheet.getRange(rowIndex, 1, 1, headers.length).getValues()[0];
+  const durationMinutes = resolveAppointmentDurationMinutes_({
+    duracion_minutos: idxDuration > -1 ? currentRow[idxDuration] : "",
+    motivo: idxReason > -1 ? currentRow[idxReason] : ""
+  });
+  if (!isAppointmentRangeAvailable_(dataObj.nueva_fecha, dataObj.nueva_hora, durationMinutes, { exclude_cita_id: dataObj.id_cita })) {
+    return { success: false, message: "Ese horario ya no esta disponible para la duracion de esta cita." };
+  }
+  
+  // Actualizamos Fecha (Col 3 / Índice 2) y Hora (Col 4 / Índice 3)
+  // Nota: Índices de columna en getRange son base 1. Fecha=3, Hora=4.
+  // Revisa tu estructura: id(1), id_pac(2), fecha(3), hora(4), motivo(5), estado(6)...
+  
+  // 1. Actualizar en Excel
+  const idxDate = headers.indexOf("fecha");
+  const idxTime = headers.indexOf("hora");
+  const idxState = headers.indexOf("estado");
+  if (idxDate > -1) sheet.getRange(rowIndex, idxDate + 1).setValue(dataObj.nueva_fecha);
+  if (idxTime > -1) sheet.getRange(rowIndex, idxTime + 1).setValue(dataObj.nueva_hora);
+  if (idxState > -1) sheet.getRange(rowIndex, idxState + 1).setValue("REAGENDADO");
+  
+  // 2. Buscar datos para el correo
+  const idPaciente = sheet.getRange(rowIndex, 2).getValue();
+  const paciente = findRow("pacientes", "id_paciente", idPaciente);
+  
+  // 3. Enviar Correo de Notificación
+  if (areEmailsEnabled_() && paciente && paciente.correo && paciente.correo.includes("@")) {
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; border-radius: 10px; overflow: hidden;">
+        <div style="background-color: #f39c12; padding: 20px; text-align: center; color: white;">
+          <h2>📅 Cita Reagendada</h2>
+        </div>
+        <div style="padding: 20px;">
+          <p>Hola <strong>${paciente.nombre_completo}</strong>,</p>
+          <p>Tu cita ha sido movida exitosamente a una nueva fecha:</p>
+          
+          <div style="background-color: #fcf8e3; padding: 15px; border-left: 5px solid #f39c12; margin: 20px 0;">
+            <p><strong>🗓️ Nueva Fecha:</strong> ${dataObj.nueva_fecha}</p>
+            <p><strong>⏰ Nueva Hora:</strong> ${dataObj.nueva_hora}</p>
+          </div>
+          
+          <p>Si tienes dudas, contáctanos.</p>
+        </div>
+      </div>
+    `;
+    MailApp.sendEmail({ to: paciente.correo, subject: "Actualización de Cita - VIDAFEM", htmlBody: html });
+  }
+
+  // 4. Notificar al médico (si existe) con botón WhatsApp al paciente
+  let doctorInfo = { email: "", name: "", phone: "" };
+  try {
+    doctorInfo = getDoctorContactForPatient_(paciente) || { email: "", name: "", phone: "" };
+    sendAppointmentEmailToDoctor(doctorInfo.email, doctorInfo.name, paciente.nombre_completo, paciente.telefono, { 
+      fecha: dataObj.nueva_fecha, 
+      hora: dataObj.nueva_hora, 
+      motivo: "REAGENDADO"
+    }, dataObj.id_cita, true);
+  } catch(e) {}
+
+  const response = { success: true, message: "Cita reagendada correctamente.", doctor_phone: doctorInfo.phone || "" };
+  const syncRes = syncAppointmentToSupabase_(findRow("citas", "id_cita", dataObj.id_cita) || {
+    id_cita: dataObj.id_cita,
+    id_paciente: idPaciente,
+    fecha: dataObj.nueva_fecha,
+    hora: dataObj.nueva_hora,
+    estado: "REAGENDADO"
+  });
+  if (syncRes && !syncRes.success && !syncRes.skipped) {
+    response.warning = syncRes.message || "No se pudo sincronizar con Supabase.";
+    response.message = "Cita reagendada correctamente. Advertencia: no se pudo sincronizar con Supabase.";
+  }
+  return response;
+}
+// ==========================================
+// 7. GESTIÓN DE HISTORIA CLÍNICA
+// ==========================================
+
+function ensureClinicalHistorySheet_() {
+  const sheet = getSheet("historia_clinica");
+  const required = [
+    "id_paciente", "app", "apf", "alergias", "aqx",
+    "menarquia", "prs", "num_parejas",
+    "ago_g", "ago_p", "ago_c", "ago_a",
+    "fecha_aborto", "pap", "fum",
+    "anticonceptivos", "tipo_anti", "tiempo_uso",
+    "tipo_ultimo", "fecha_actualizacion"
+  ];
+
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(required);
+    return { sheet: sheet, headers: required };
+  }
+
+  const lastCol = Math.max(sheet.getLastColumn(), required.length);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  required.forEach(function(name) {
+    if (headers.indexOf(name) !== -1) return;
+    const col = sheet.getLastColumn() + 1;
+    sheet.getRange(1, col).setValue(name);
+    headers.push(name);
+    if (sheet.getLastRow() > 1) {
+      sheet.getRange(2, col, sheet.getLastRow() - 1, 1).setValues(
+        new Array(sheet.getLastRow() - 1).fill([""])
+      );
+    }
+  });
+
+  return { sheet: sheet, headers: headers };
+}
+
+function buildClinicalHistoryFromSheetRow_(headers, row) {
+  const rowObj = mapSheetRowObject_(headers, row);
+  const tipoUlt = String(rowObj.tipo_ultimo || "").trim()
+    || (String(rowObj.es_parto || "").trim().toUpperCase() === "SI" ? "Parto" : "")
+    || (String(rowObj.es_aborto || "").trim().toUpperCase() === "SI" ? "Aborto" : "");
+
+  return {
+    id_paciente: String(rowObj.id_paciente || "").trim(),
+    app: String(rowObj.app || "").trim(),
+    apf: String(rowObj.apf || "").trim(),
+    alergias: String(rowObj.alergias || "").trim(),
+    aqx: String(rowObj.aqx || "").trim(),
+    menarquia: String(rowObj.menarquia || "").trim(),
+    prs: String(rowObj.prs || "").trim(),
+    num_parejas: String(rowObj.num_parejas || "").trim(),
+    ago_g: String(rowObj.ago_g || "").trim(),
+    ago_p: String(rowObj.ago_p || "").trim(),
+    ago_c: String(rowObj.ago_c || "").trim(),
+    ago_a: String(rowObj.ago_a || "").trim(),
+    fecha_aborto: toIsoDate(rowObj.fecha_aborto || rowObj.fecha_ultimo_evento),
+    pap: String(rowObj.pap || "").trim(),
+    fum: toIsoDate(rowObj.fum),
+    anticonceptivos: String(rowObj.anticonceptivos || "").trim(),
+    tipo_anti: String(rowObj.tipo_anti || "").trim(),
+    tiempo_uso: String(rowObj.tiempo_uso || "").trim(),
+    tipo_ultimo: tipoUlt,
+    fecha_actualizacion: rowObj.fecha_actualizacion || ""
+  };
+}
+
+function buildClinicalHistorySheetRow_(headers, dataObj, updatedAt) {
+  const row = new Array(headers.length).fill("");
+  const source = dataObj || {};
+  const tipoUlt = String(source.tipo_ultimo || "").trim();
+  const fechaAborto = String(source.fecha_aborto || source.fecha_ultimo_evento || "").trim();
+
+  for (let i = 0; i < headers.length; i++) {
+    const key = headers[i];
+    if (key === "fecha_actualizacion") {
+      row[i] = updatedAt || new Date();
+    } else if (key === "fecha_aborto" || key === "fecha_ultimo_evento") {
+      row[i] = fechaAborto;
+    } else if (key === "tipo_ultimo") {
+      row[i] = tipoUlt;
+    } else if (key === "es_parto") {
+      row[i] = tipoUlt.toUpperCase() === "PARTO" ? "SI" : "NO";
+    } else if (key === "es_aborto") {
+      row[i] = tipoUlt.toUpperCase() === "ABORTO" ? "SI" : "NO";
+    } else if (Object.prototype.hasOwnProperty.call(source, key)) {
+      row[i] = source[key];
+    }
+  }
+  return row;
+}
+
+function getClinicalHistory(patientId) {
+  const ensured = ensureClinicalHistorySheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return {};
+
+  for (let i = 1; i < data.length; i++) {
+    const mapped = buildClinicalHistoryFromSheetRow_(headers, data[i]);
+    if (String(mapped.id_paciente) === String(patientId)) {
+      return mapped;
+    }
+  }
+  return {};
+}
+
+function saveClinicalHistory(dataObj) {
+  const ensured = ensureClinicalHistorySheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const patientId = String((dataObj && dataObj.id_paciente) || "").trim();
+  if (!patientId) {
+    return { success: false, message: "Falta id_paciente." };
+  }
+
+  const rowIndex = findRowIndex(sheet, "id_paciente", patientId);
+  const updatedAt = new Date();
+  const rowData = buildClinicalHistorySheetRow_(headers, dataObj || {}, updatedAt);
+
+  if (rowIndex !== -1) {
+    const range = sheet.getRange(rowIndex, 1, 1, headers.length);
+    range.setNumberFormat('@');
+    range.setValues([rowData]);
+  } else {
+    sheet.appendRow(rowData);
+  }
+
+  const historyRecord = getClinicalHistory(patientId);
+  if (!historyRecord.fecha_actualizacion) {
+    historyRecord.fecha_actualizacion = updatedAt;
+  }
+
+  const response = { success: true, message: "Historia clínica guardada." };
+  const syncRes = syncClinicalHistoryToSupabase_(historyRecord);
+  if (syncRes && !syncRes.success && !syncRes.skipped) {
+    response.warning = syncRes.message || "No se pudo sincronizar con Supabase.";
+    response.message = "Historia clínica guardada. Advertencia: no se pudo sincronizar con Supabase.";
+    try {
+      var warningPayload = {
+        patient_id: patientId,
+        sync_error: response.warning
+      };
+      console.log("[HISTORIA_SYNC_WARNING] " + JSON.stringify(warningPayload));
+      Logger.log("[HISTORIA_SYNC_WARNING] " + JSON.stringify(warningPayload));
+    } catch (e) {}
+  }
+  return response;
+}
+// ==========================================
+// 9. GESTIÓN DE PROMOCIONES (SISTEMA MULTIPLE)
+// ==========================================
+
+function normalizePromotionLower_(value) {
+  return String(value === undefined || value === null ? "" : value).trim().toLowerCase();
+}
+
+function normalizePromotionScope_(value) {
+  return String(value || "").trim().toUpperCase() === "ALL" ? "ALL" : "OWNER";
+}
+
+function ensurePromotionSheet_() {
+  const sheet = getSheet("config_promociones");
+  const required = [
+    "id_promo",
+    "mensaje",
+    "fecha_inicio",
+    "fecha_fin",
+    "scope_visibility",
+    "owner_usuario",
+    "fecha_creacion"
+  ];
+
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(required);
+    return { sheet: sheet, headers: required };
+  }
+
+  const lastCol = Math.max(sheet.getLastColumn(), required.length);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  required.forEach(function(name) {
+    if (headers.indexOf(name) !== -1) return;
+    const col = sheet.getLastColumn() + 1;
+    sheet.getRange(1, col).setValue(name);
+    headers.push(name);
+  });
+
+  return { sheet: sheet, headers: headers };
+}
+
+function mapPromotionRow_(headers, row, rowIndex) {
+  const idxId = headers.indexOf("id_promo");
+  const idxMsg = headers.indexOf("mensaje");
+  const idxStart = headers.indexOf("fecha_inicio");
+  const idxEnd = headers.indexOf("fecha_fin");
+  const idxScope = headers.indexOf("scope_visibility");
+  const idxOwner = headers.indexOf("owner_usuario");
+  const idxCreated = headers.indexOf("fecha_creacion");
+
+  const id = idxId > -1 ? String(row[idxId] || "").trim() : "";
+  if (!id) return null;
+  return {
+    rowIndex: rowIndex,
+    id: id,
+    mensaje: idxMsg > -1 ? String(row[idxMsg] || "").trim() : "",
+    inicio: idxStart > -1 ? toIsoDate(row[idxStart]) : "",
+    fin: idxEnd > -1 ? toIsoDate(row[idxEnd]) : "",
+    scope_visibility: normalizePromotionScope_(idxScope > -1 ? row[idxScope] : ""),
+    owner_usuario: normalizePromotionLower_(idxOwner > -1 ? row[idxOwner] : ""),
+    fecha_creacion: idxCreated > -1 ? toIsoDate(row[idxCreated]) : ""
+  };
+}
+
+function getPromotionViewerDoctor_(requester) {
+  const req = String(requester || "").trim();
+  if (!req) return "";
+  const patient = findRow("pacientes", "id_paciente", req);
+  if (patient) return normalizePromotionLower_(patient.creado_por || "");
+  return normalizePromotionLower_(req);
+}
+
+function savePromotion(dataObj, requester) {
+  const data = dataObj || {};
+  const message = String(data.mensaje || "").trim();
+  const inicio = String(data.fecha_inicio || "").trim();
+  const fin = String(data.fecha_fin || "").trim();
+  const scope = normalizePromotionScope_(data.scope_visibility);
+  const owner = normalizePromotionLower_(requester);
+
+  if (!message || !inicio || !fin) {
+    return { success: false, message: "Completa mensaje, fecha_inicio y fecha_fin." };
+  }
+
+  const ensured = ensurePromotionSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const idPromo = "PROMO-" + new Date().getTime();
+
+  const row = new Array(headers.length).fill("");
+  const idxId = headers.indexOf("id_promo");
+  const idxMsg = headers.indexOf("mensaje");
+  const idxStart = headers.indexOf("fecha_inicio");
+  const idxEnd = headers.indexOf("fecha_fin");
+  const idxScope = headers.indexOf("scope_visibility");
+  const idxOwner = headers.indexOf("owner_usuario");
+  const idxCreated = headers.indexOf("fecha_creacion");
+
+  if (idxId > -1) row[idxId] = idPromo;
+  if (idxMsg > -1) row[idxMsg] = message;
+  if (idxStart > -1) row[idxStart] = inicio;
+  if (idxEnd > -1) row[idxEnd] = fin;
+  if (idxScope > -1) row[idxScope] = scope;
+  if (idxOwner > -1) row[idxOwner] = owner;
+  if (idxCreated > -1) row[idxCreated] = new Date();
+
+  sheet.appendRow(row);
+  const saved = mapPromotionRow_(headers, row, sheet.getLastRow());
+  const syncRes = syncPromotionToSupabase_(saved);
+  if (syncRes && !syncRes.success && !syncRes.skipped) {
+    return {
+      success: true,
+      message: "Promocion guardada. Advertencia: no se pudo sincronizar con Supabase.",
+      warning: syncRes.message || "No se pudo sincronizar con Supabase."
+    };
+  }
+  return { success: true, message: "Promocion guardada." };
+}
+
+function getActivePromotion(requester) {
+  const ensured = ensurePromotionSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return { success: true, active: false };
+
+  const viewerDoctor = getPromotionViewerDoctor_(requester);
+  const today = Utilities.formatDate(new Date(), "GMT-5", "yyyy-MM-dd");
+
+  for (let i = data.length - 1; i >= 1; i--) {
+    const mapped = mapPromotionRow_(headers, data[i], i + 1);
+    if (!mapped || !mapped.inicio || !mapped.fin) continue;
+    if (!(today >= mapped.inicio && today <= mapped.fin)) continue;
+
+    if (mapped.scope_visibility === "ALL") {
+      return {
+        success: true,
+        active: true,
+        id: mapped.id,
+        mensaje: mapped.mensaje,
+        fin: mapped.fin,
+        scope_visibility: mapped.scope_visibility
+      };
+    }
+
+    if (mapped.owner_usuario && viewerDoctor && mapped.owner_usuario === viewerDoctor) {
+      return {
+        success: true,
+        active: true,
+        id: mapped.id,
+        mensaje: mapped.mensaje,
+        fin: mapped.fin,
+        scope_visibility: mapped.scope_visibility
+      };
+    }
+  }
+
+  return { success: true, active: false };
+}
+
+function getPromoConfig(requester) {
+  const ensured = ensurePromotionSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return { success: true, list: [] };
+
+  const req = normalizePromotionLower_(requester);
+  const isSuper = !!(typeof isSuperadminUser === "function" && req && isSuperadminUser(req));
+  const list = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const mapped = mapPromotionRow_(headers, data[i], i + 1);
+    if (!mapped) continue;
+    if (!isSuper && req && mapped.owner_usuario && mapped.owner_usuario !== req) continue;
+    list.push({
+      id: mapped.id,
+      mensaje: mapped.mensaje,
+      inicio: mapped.inicio,
+      fin: mapped.fin,
+      scope_visibility: mapped.scope_visibility,
+      owner_usuario: mapped.owner_usuario
+    });
+  }
+
+  return { success: true, list: list.reverse() };
+}
+
+function deletePromotion(idPromo, requester) {
+  const targetId = String(idPromo || "").trim();
+  const req = normalizePromotionLower_(requester);
+  if (!targetId || !req) return { success: false, message: "Datos incompletos." };
+
+  const ensured = ensurePromotionSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return { success: false, message: "Promocion no encontrada." };
+
+  const isSuper = !!(typeof isSuperadminUser === "function" && isSuperadminUser(req));
+  let target = null;
+  for (let i = 1; i < data.length; i++) {
+    const mapped = mapPromotionRow_(headers, data[i], i + 1);
+    if (!mapped || mapped.id !== targetId) continue;
+    target = mapped;
+    break;
+  }
+
+  if (!target) return { success: false, message: "Promocion no encontrada." };
+  if (!isSuper && target.owner_usuario && target.owner_usuario !== req) {
+    return { success: false, message: "Solo el medico creador puede eliminar esta promocion." };
+  }
+
+  sheet.deleteRow(target.rowIndex);
+  const syncRes = deletePromotionFromSupabase_(target.id);
+  if (syncRes && !syncRes.success && !syncRes.skipped) {
+    return {
+      success: true,
+      message: "Promocion eliminada. Advertencia: no se pudo sincronizar con Supabase.",
+      warning: syncRes.message || "No se pudo sincronizar con Supabase."
+    };
+  }
+  return { success: true, message: "Promocion eliminada." };
+}
+// ==========================================
+// 10. GESTIÓN DE REPORTES (MAESTRO: SOBREESCRITURA + LIMPIEZA)
+
+// Database.gs - VERSIÓN ESTRICTA DE CARPETAS
+
+// ======================================================
+// 1. REEMPLAZA ESTA FUNCIÓN EN Database.gs
+// ======================================================
+
+// ======================================================
+// PARTE 4: GUARDADO AVANZADO (CORREGIDO PARA EDICIÓN Y ADJUNTOS)
+// ======================================================
+// ==========================================
+// FUNCIÓN MAESTRA DE GUARDADO (BLINDADA)
+// ==========================================
+
+// ==========================================
+// FUNCIÓN MAESTRA DE GUARDADO Y PDF (VERSIÓN FINAL COMPACTA)
+// ==========================================
+
+function saveDiagnosisAdvanced(dataObj) {
+  const lock = LockService.getScriptLock();
+  try { lock.waitLock(30000); } catch (e) { return { success: false, message: "Servidor ocupado." }; }
+
+  try {
+    const sheet = getOrCreateSheet("diagnosticos_archivos", [
+      "id_reporte", "id_paciente", "tipo_examen", "fecha", "datos_json", "pdf_url", "creado_por"
+    ]);
+
+    // 1. DETECCIÓN ROBUSTA DE EDICIÓN
+    let isUpdate = false;
+    let rowIndex = -1;
+    let oldJsonData = {};
+    let oldPdfUrl = "";
+    let oldCreatedBy = "";
+
+    const incomingReportId = String(dataObj.id_reporte || "").trim();
+    const hasIncomingReportId = !!incomingReportId && incomingReportId !== "null";
+
+    // Solo buscamos si dataObj.id_reporte tiene valor real
+    if (hasIncomingReportId) {
+      const data = sheet.getDataRange().getValues();
+      for(let i=1; i<data.length; i++) {
+        // FORZAMOS LA COMPARACIÓN COMO TEXTO PARA EVITAR ERRORES
+        if(String(data[i][0]).trim() === incomingReportId) {
+          isUpdate = true;
+          rowIndex = i + 1;
+          oldPdfUrl = data[i][5]; 
+          oldCreatedBy = String(data[i][6] || "").trim();
+          try { oldJsonData = JSON.parse(data[i][4]); } catch(e){}
+          break;
+        }
+      }
+    }
+
+    // Si el reporte ya existe en Supabase pero aun no en Sheets, reutilizamos el mismo id
+    // para no crear un duplicado al pasar de "solo guardar" a "guardar y generar PDF".
+    const idReporte = hasIncomingReportId ? incomingReportId : "REP-" + new Date().getTime();
+    dataObj.id_reporte = idReporte;
+
+    // 2. GESTIÓN DE CARPETAS (Usando tu helper existente)
+    let reportFolder = getReportFolder(dataObj, isUpdate, oldJsonData, idReporte);
+
+    // 3. PROCESAR IMÁGENES
+    const imgsForDoc = {}; 
+    const finalFileIds = [];
+    
+    if (dataObj.imagenes && Array.isArray(dataObj.imagenes)) {
+      dataObj.imagenes.forEach(img => {
+        try {
+            if(img.isNew && img.data) {
+              const decoded = Utilities.base64Decode(img.data.split(',')[1]);
+              const blob = Utilities.newBlob(decoded, "image/jpeg", `FOTO_${img.index}.jpg`);
+              const file = reportFolder.createFile(blob); 
+              finalFileIds.push(file.getId());
+              imgsForDoc[img.index] = blob; 
+              img.fileId = file.getId();
+              img.data = null; 
+            } else if (img.fileId) {
+                 finalFileIds.push(img.fileId);
+                 try { imgsForDoc[img.index] = DriveApp.getFileById(img.fileId).getBlob(); } catch(e){}
+            }
+        } catch(e) { console.log("Error foto: " + e); }
+      });
+    }
+    if (!finalFileIds.length && isUpdate && oldJsonData.drive_file_ids && Array.isArray(oldJsonData.drive_file_ids)) {
+      oldJsonData.drive_file_ids.forEach(function(fileId) {
+        const cleanId = String(fileId || "").trim();
+        if (!cleanId || finalFileIds.indexOf(cleanId) !== -1) return;
+        finalFileIds.push(cleanId);
+      });
+    }
+
+    // 4. PDF EXTERNO
+    let pdfExternos = handleExternalPdf(dataObj, isUpdate, oldJsonData, reportFolder);
+    let pdfExternoUrl = pdfExternos.length ? String(pdfExternos[0].url || "").trim() : "";
+
+    // 5. GENERAR PDFS (Reporte y Receta)
+    const examType = String(dataObj.tipo_examen || "").trim().toUpperCase();
+    const isRecipeOnly = examType === "RECETA";
+    const isExternalPdfOnly = examType === "EXAMENPDF";
+    const hasClinicalReportContent = diagnosisHasMeaningfulReportContent_(dataObj);
+    const skipClinicalReportPdf = isRecipeOnly || isExternalPdfOnly || !hasClinicalReportContent;
+    if (isExternalPdfOnly && !pdfExternoUrl) {
+        return { success: false, message: "Debes adjuntar un PDF para guardar en EXAMENPDF." };
+    }
+    let pdfUrl = oldPdfUrl || "";
+    let pdfRecetaUrl = oldJsonData.pdf_receta_link || "";
+
+    if (dataObj.generar_pdf) {
+        // A. REPORTE
+        if (!skipClinicalReportPdf) {
+            try {
+                if (isUpdate && oldPdfUrl && oldPdfUrl.includes("id=")) {
+                    try { DriveApp.getFileById(oldPdfUrl.match(/id=([a-zA-Z0-9_-]+)/)[1]).setTrashed(true); } catch(e) {}
+                }
+                pdfUrl = createPdfFromTemplateCompact(dataObj, imgsForDoc, reportFolder);
+            } catch (e) { console.log("Error PDF: " + e.message); }
+        }
+        // B. RECETA
+        if (dataObj.medicamentos && dataObj.medicamentos.length > 0) {
+            try {
+                if (isUpdate && oldJsonData.pdf_receta_link) {
+                    try { DriveApp.getFileById(oldJsonData.pdf_receta_link.match(/id=([a-zA-Z0-9_-]+)/)[1]).setTrashed(true); } catch(e){}
+                }
+                pdfRecetaUrl = createRecetaDocFixed(dataObj, reportFolder); 
+            } catch (e) { console.log("Error Receta: " + e.message); }
+        }
+    }
+
+    // 6. GUARDAR EN EXCEL
+    const savedAt = new Date();
+    const mergedDataObj = mergeDiagnosisPayloadForSave_(oldJsonData, dataObj, examType);
+    saveToExcel(sheet, rowIndex, isUpdate, idReporte, mergedDataObj, finalFileIds, reportFolder.getId(), pdfUrl, pdfRecetaUrl, pdfExternos, savedAt);
+
+    const cleanSync = { ...mergedDataObj };
+    cleanSync.drive_file_ids = finalFileIds;
+    cleanSync.report_folder_id = reportFolder.getId();
+    cleanSync.pdf_receta_link = pdfRecetaUrl;
+    cleanSync.pdf_externos = pdfExternos;
+    cleanSync.pdf_externo_link = pdfExternoUrl;
+    delete cleanSync.pdf_externo;
+    if (cleanSync.imagenes) {
+      cleanSync.imagenes = cleanSync.imagenes.map(function(img) {
+        return { index: img.index, title: img.title || "", fileId: img.fileId, isNew: false };
+      });
+    }
+    const datosJsonSync = JSON.stringify(cleanSync);
+    const diagnosisRow = {
+      id_reporte: idReporte,
+      id_paciente: dataObj.id_paciente,
+      tipo_examen: dataObj.tipo_examen,
+      fecha: savedAt,
+      datos_json: datosJsonSync,
+      pdf_url: pdfUrl,
+      creado_por: oldCreatedBy || "DOCTOR"
+    };
+    const syncRes = syncDiagnosisToSupabase_(diagnosisRow);
+    if (syncRes && !syncRes.success && !syncRes.skipped) {
+      return {
+        success: true,
+        message: "Guardado exitoso. Advertencia: no se pudo sincronizar con Supabase.",
+        warning: syncRes.message || "No se pudo sincronizar con Supabase.",
+        id_reporte: idReporte,
+        pdf_url: pdfUrl,
+        pdf_receta_url: pdfRecetaUrl,
+        pdf_externo_url: pdfExternoUrl,
+        pdf_externos: pdfExternos
+      };
+    }
+
+    return { 
+        success: true, 
+        message: "Guardado exitoso", 
+        id_reporte: idReporte, // IMPORTANTE: Devolvemos el ID
+        pdf_url: pdfUrl,
+        pdf_receta_url: pdfRecetaUrl,
+        pdf_externo_url: pdfExternoUrl,
+        pdf_externos: pdfExternos
+    };
+
+  } catch (error) {
+    return { success: false, message: "ERROR CRÍTICO: " + error.toString() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function parseVirtualSignatureBool_(value, fallback) {
+  const defaultValue = fallback === undefined ? true : !!fallback;
+  if (value === undefined || value === null || value === "") return defaultValue;
+  if (value === true || value === 1) return true;
+  if (value === false || value === 0) return false;
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return defaultValue;
+  if (raw === "si" || raw === "true" || raw === "1" || raw === "yes" || raw === "on") return true;
+  if (raw === "no" || raw === "false" || raw === "0" || raw === "off") return false;
+  return defaultValue;
+}
+
+function ensureDoctorSignatureColumnsInAdmin_() {
+  const sheet = getConnection().getSheetByName("usuarios_admin");
+  if (!sheet || sheet.getLastRow() === 0) return;
+
+  const required = [
+    { name: "registro_sanitario", defaultValue: "" },
+    { name: "usar_firma_virtual", defaultValue: "SI" }
+  ];
+
+  const headers = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), required.length)).getValues()[0];
+  required.forEach(function(def) {
+    if (headers.indexOf(def.name) !== -1) return;
+    const col = sheet.getLastColumn() + 1;
+    sheet.getRange(1, col).setValue(def.name);
+    headers.push(def.name);
+    if (sheet.getLastRow() > 1) {
+      sheet.getRange(2, col, sheet.getLastRow() - 1, 1).setValues(
+        new Array(sheet.getLastRow() - 1).fill([def.defaultValue])
+      );
+    }
+  });
+}
+
+function getDoctorVirtualSignatureMeta_(doctorUser) {
+  const user = String(doctorUser || "").trim().toLowerCase();
+  if (!user) {
+    return {
+      usuario: "",
+      nombre_doctor: "",
+      rol: "DOCTOR",
+      registro_sanitario: "",
+      usar_firma_virtual: true
+    };
+  }
+
+  ensureDoctorSignatureColumnsInAdmin_();
+  const doctor = findRow("usuarios_admin", "usuario", user) || {};
+
+  return {
+    usuario: user,
+    nombre_doctor: String(doctor.nombre_doctor || doctor.nombre || user).trim(),
+    rol: String(doctor.rol || doctor.ocupacion || "DOCTOR").trim(),
+    registro_sanitario: String(doctor.registro_sanitario || "").trim(),
+    usar_firma_virtual: parseVirtualSignatureBool_(doctor.usar_firma_virtual, true)
+  };
+}
+
+function shouldIncludeDoctorVirtualSignature_(data, meta) {
+  if (data && Object.prototype.hasOwnProperty.call(data, "incluir_firma_virtual")) {
+    return parseVirtualSignatureBool_(data.incluir_firma_virtual, meta ? meta.usar_firma_virtual : true);
+  }
+  return meta ? !!meta.usar_firma_virtual : true;
+}
+
+function formatDoctorRoleForVirtualSignature_(role) {
+  const text = String(role || "DOCTOR").trim().toUpperCase();
+  if (!text) return "DOCTOR";
+  if (text.length > 22 && text.indexOf(" Y ") > -1) {
+    return text.replace(" Y ", "\nY ");
+  }
+  if (text.length > 24 && text.indexOf(" / ") > -1) {
+    return text.replace(" / ", "\n");
+  }
+  return text;
+}
+
+function escapeVirtualSignatureSvgText_(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function getVirtualSignatureLogoSvgBlob_() {
+  const svg = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">',
+    '<circle cx="128" cy="128" r="120" fill="#43286d"/>',
+    '<circle cx="141" cy="67" r="30" fill="#c9c8e8"/>',
+    '<circle cx="101" cy="122" r="22" fill="#b6b3da"/>',
+    '<path d="M123 98 C153 91 176 108 178 139 C180 178 157 210 124 237 L124 152 C124 129 123 113 123 98 Z" fill="#b79ac8"/>',
+    '<path d="M68 116 C59 140 66 170 88 194 C98 205 111 217 124 230 L124 191 C101 178 82 151 77 124 C74 120 72 118 68 116 Z" fill="#d7b7dd"/>',
+    '</svg>'
+  ].join("");
+  return Utilities.newBlob(svg, "image/svg+xml", "vidafem_logo_vector.svg");
+}
+
+function getVirtualSignatureLogoPngFallbackBlob_() {
+  try {
+    return DriveApp.getFileById("19XDG03VUmDiKoL0JiiSdtrQO7wa6epII").getBlob();
+  } catch (e) {}
+
+  const b64 =
+    "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";
+  return Utilities.newBlob(Utilities.base64Decode(b64), "image/png", "logo2.png");
+}
+
+function getVirtualSignatureLogoBlob_() {
+  try {
+    return getVirtualSignatureLogoSvgBlob_();
+  } catch (e) {}
+  return getVirtualSignatureLogoPngFallbackBlob_();
+}
+
+function buildDoctorVirtualSignatureSealSvgBlob_(meta) {
+  const doctorName = escapeVirtualSignatureSvgText_(String(meta && meta.nombre_doctor || "").trim());
+  const roleText = formatDoctorRoleForVirtualSignature_(meta && meta.rol || "DOCTOR");
+  const roleLines = String(roleText || "DOCTOR").split("\n").filter(function(line) {
+    return String(line || "").trim();
+  });
+  const safeRoleLines = roleLines.length ? roleLines.slice(0, 3) : ["DOCTOR"];
+  const registerLine = String(meta && meta.registro_sanitario || "").trim()
+    ? "Reg. San. " + String(meta.registro_sanitario || "").trim()
+    : "";
+
+  const svgParts = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="550" height="146" viewBox="0 0 550 146">',
+    '<rect width="550" height="146" fill="transparent"/>',
+    '<g transform="translate(92 20)">',
+    '<g transform="translate(0 8) scale(0.28515625)">',
+    '<circle cx="128" cy="128" r="120" fill="#43286d"/>',
+    '<circle cx="141" cy="67" r="30" fill="#c9c8e8"/>',
+    '<circle cx="101" cy="122" r="22" fill="#b6b3da"/>',
+    '<path d="M123 98 C153 91 176 108 178 139 C180 178 157 210 124 237 L124 152 C124 129 123 113 123 98 Z" fill="#b79ac8"/>',
+    '<path d="M68 116 C59 140 66 170 88 194 C98 205 111 217 124 230 L124 191 C101 178 82 151 77 124 C74 120 72 118 68 116 Z" fill="#d7b7dd"/>',
+    '</g>'
+  ];
+
+  const nameStartX = 0;
+  const roleStartY = safeRoleLines.length > 1 ? 45 : 52;
+  const roleStep = 14;
+  svgParts.push(
+    '<text x="' + String(nameStartX) + '" y="18" text-anchor="start" fill="#2f2541" font-family="Georgia, Times New Roman, serif" font-size="17" font-style="italic" font-weight="700">',
+    doctorName,
+    '</text>'
+  );
+  svgParts.push('<g transform="translate(82 0)">');
+  for (var i = 0; i < safeRoleLines.length; i++) {
+    svgParts.push(
+      '<text x="0" y="' + String(roleStartY + (i * roleStep)) + '" text-anchor="start" fill="#4a386d" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700">',
+      escapeVirtualSignatureSvgText_(safeRoleLines[i]),
+      '</text>'
+    );
+  }
+  if (registerLine) {
+    svgParts.push(
+      '<text x="0" y="' + String(roleStartY + (safeRoleLines.length * roleStep) + 7) + '" text-anchor="start" fill="#5a5a5a" font-family="Arial, Helvetica, sans-serif" font-size="11" font-style="italic" font-weight="600">',
+      escapeVirtualSignatureSvgText_(registerLine),
+      '</text>'
+    );
+  }
+  svgParts.push('</g>');
+  svgParts.push('</g>');
+  svgParts.push('</svg>');
+
+  return Utilities.newBlob(svgParts.join(""), "image/svg+xml", "vidafem_virtual_signature_seal.svg");
+}
+
+function appendDoctorVirtualSignature_(body, data) {
+  if (!body || !data) return false;
+
+  const meta = getDoctorVirtualSignatureMeta_(data.doctor_usuario || data.creado_por || "");
+  if (!shouldIncludeDoctorVirtualSignature_(data, meta)) return false;
+
+  const doctorName = String(meta.nombre_doctor || meta.usuario || "").trim();
+  if (!doctorName) return false;
+
+  const doctorRole = formatDoctorRoleForVirtualSignature_(meta.rol);
+  const registerLine = String(meta.registro_sanitario || "").trim()
+    ? "Reg. San. " + String(meta.registro_sanitario || "").trim()
+    : "";
+
+  try {
+    const sealParagraph = body.appendParagraph("");
+    sealParagraph
+      .setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+      .setSpacingBefore(4)
+      .setSpacingAfter(0);
+    const sealImage = sealParagraph.appendInlineImage(buildDoctorVirtualSignatureSealSvgBlob_(meta));
+    sealImage.setWidth(282).setHeight(75);
+    return true;
+  } catch (eSeal) {}
+
+  body.appendParagraph("").setSpacingBefore(4).setSpacingAfter(0);
+
+  const outer = body.appendTable();
+  outer.setBorderWidth(0);
+  const outerRow = outer.appendTableRow();
+  outerRow.appendTableCell("");
+  const centerCell = outerRow.appendTableCell("");
+  outerRow.appendTableCell("");
+  outer.setColumnWidth(0, 124);
+  outer.setColumnWidth(1, 252);
+  outer.setColumnWidth(2, 124);
+
+  centerCell.setPaddingTop(0).setPaddingBottom(0).setPaddingLeft(0).setPaddingRight(0);
+
+  const pName = centerCell.getChild(0).asParagraph();
+  pName.setText(doctorName);
+  pName
+    .setAlignment(DocumentApp.HorizontalAlignment.LEFT)
+    .setBold(true)
+    .setItalic(true)
+    .setFontSize(12)
+    .setForegroundColor("#2f2541")
+    .setIndentStart(0)
+    .setSpacingBefore(0)
+    .setSpacingAfter(0);
+
+  const inner = centerCell.appendTable();
+  inner.setBorderWidth(0);
+  const innerRow = inner.appendTableRow();
+  const logoCell = innerRow.appendTableCell("");
+  const textCell = innerRow.appendTableCell("");
+  inner.setColumnWidth(0, 54);
+  inner.setColumnWidth(1, 198);
+
+  logoCell
+    .setPaddingTop(0)
+    .setPaddingBottom(0)
+    .setPaddingLeft(2)
+    .setPaddingRight(0)
+    .setVerticalAlignment(DocumentApp.VerticalAlignment.MIDDLE);
+  textCell
+    .setPaddingTop(0)
+    .setPaddingBottom(0)
+    .setPaddingLeft(0)
+    .setPaddingRight(0)
+    .setVerticalAlignment(DocumentApp.VerticalAlignment.MIDDLE);
+
+  try {
+    const logoParagraph = logoCell.getChild(0).asParagraph();
+    logoParagraph
+      .setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+      .setSpacingBefore(0)
+      .setSpacingAfter(0);
+    let logoImg = null;
+    try {
+      logoImg = logoParagraph.appendInlineImage(getVirtualSignatureLogoSvgBlob_());
+    } catch (eSvg) {
+      logoImg = logoParagraph.appendInlineImage(getVirtualSignatureLogoPngFallbackBlob_());
+    }
+    if (logoImg) logoImg.setWidth(46).setHeight(46);
+  } catch (e) {}
+
+  const roleLines = String(doctorRole || "").split("\n").filter(function(line) {
+    return String(line || "").trim();
+  });
+  const firstRoleLine = roleLines.length ? roleLines.shift() : "DOCTOR";
+
+  const pRole = textCell.getChild(0).asParagraph();
+  pRole.setText(firstRoleLine);
+  pRole
+    .setAlignment(DocumentApp.HorizontalAlignment.LEFT)
+    .setBold(true)
+    .setFontSize(9)
+    .setForegroundColor("#4a386d")
+    .setSpacingAfter(0)
+    .setSpacingBefore(0);
+
+  for (let i = 0; i < roleLines.length; i++) {
+    textCell.appendParagraph(roleLines[i])
+      .setAlignment(DocumentApp.HorizontalAlignment.LEFT)
+      .setBold(true)
+      .setFontSize(9)
+      .setForegroundColor("#4a386d")
+      .setSpacingAfter(0)
+      .setSpacingBefore(0);
+  }
+
+  if (registerLine) {
+    textCell.appendParagraph(registerLine)
+      .setAlignment(DocumentApp.HorizontalAlignment.LEFT)
+      .setBold(false)
+      .setItalic(true)
+      .setFontSize(8)
+      .setForegroundColor("#5a5a5a")
+      .setSpacingBefore(0)
+      .setSpacingAfter(0);
+  }
+
+  return true;
+}
+
+// // ==========================================
+// GENERADOR PDF PRO (FORMATO ULTRA COMPACTO)
+// ==========================================
+// ==========================================
+// GENERADOR PDF PRO (CORREGIDO: FOTOS AUTOMÁTICAS Y TEXTO NORMAL)
+// ==========================================
+function createPdfFromTemplateCompact(data, imgsMap, folder) {
+  function normalizeTextSafe(s) {
+    return String(s || "")
+      .replace(/\u00A0/g, " ")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .trim()
+      .toLowerCase();
+  }
+
+  function getBodyTextSafe(b) {
+    try { return normalizeTextSafe(b.getText()); } catch (e) { return ""; }
+  }
+
+  function getElementTextSafe(el) {
+    try {
+      if (el.getType() === DocumentApp.ElementType.PARAGRAPH) return normalizeTextSafe(el.asParagraph().getText());
+      if (el.getType() === DocumentApp.ElementType.LIST_ITEM) return normalizeTextSafe(el.asListItem().getText());
+    } catch (e) {}
+    return "";
+  }
+
+  function cleanupTextArtifactsInSection(section, normalizedDocName) {
+    if (!section) return;
+    try {
+      section.replaceText("(i)\\s*(pestaña|pestana|tab|document\\s*tab)\\s*\\d+\\s*", "");
+      section.replaceText("(i)\\s*(pestaña|pestana)\\s*sin\\s*titulo\\s*", "");
+      section.replaceText("(i)\\s*untitled\\s*tab\\s*", "");
+      section.replaceText("(i)\\s*tab\\s*without\\s*title\\s*", "");
+      if (normalizedDocName) {
+        section.replaceText("(i)\\s*" + normalizedDocName.replace(/[.*+^${}()|[\]\\]/g, "\\$&") + "\\s*", "");
+      }
+    } catch (e) {}
+  }
+
+  function cleanupDocTabs(doc, expectedDocName) {
+    if (typeof doc.getTabs !== "function") return;
+    if (typeof doc.removeTab !== "function") return;
+
+    let tabs = [];
+    try { tabs = doc.getTabs() || []; } catch (e) { tabs = []; }
+    if (!tabs || tabs.length <= 1) return;
+
+    const normalizedExpected = normalizeTextSafe(expectedDocName);
+    let removed = 0;
+
+    for (let i = 0; i < tabs.length; i++) {
+      if ((tabs.length - removed) <= 1) break;
+      const tab = tabs[i];
+      if (!tab) continue;
+
+      const tabName = normalizeTextSafe(
+        (typeof tab.getTitle === "function" ? tab.getTitle() : "") ||
+        (typeof tab.getName === "function" ? tab.getName() : "")
+      );
+
+      let tabBody = null;
+      try {
+        if (typeof tab.asDocumentTab === "function") {
+          const dt = tab.asDocumentTab();
+          if (dt && typeof dt.getBody === "function") tabBody = dt.getBody();
+        }
+      } catch (e) {}
+
+      const bodyText = tabBody ? getBodyTextSafe(tabBody) : "";
+      const bodyChildren = tabBody ? tabBody.getNumChildren() : 0;
+      const isEmpty = !bodyText || bodyChildren <= 1;
+      const isArtifactName =
+        /^pestana\s*\d+$/i.test(tabName) ||
+        /^tab\s*\d+$/i.test(tabName) ||
+        /^pestana\s*sin\s*titulo$/i.test(tabName) ||
+        /^untitled\s*tab$/i.test(tabName) ||
+        tabName === normalizedExpected;
+
+      if (isEmpty || isArtifactName) {
+        try {
+          if (typeof tab.getId === "function") {
+            doc.removeTab(tab.getId());
+            removed++;
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  function getBestTemplateBody(doc) {
+    let fallbackBody = doc.getBody();
+    if (typeof doc.getTabs !== "function") return fallbackBody;
+
+    let tabs = [];
+    try { tabs = doc.getTabs() || []; } catch (e) { tabs = []; }
+    if (!tabs || tabs.length === 0) return fallbackBody;
+
+    let best = null;
+    let bestScore = -1;
+
+    tabs.forEach(tab => {
+      try {
+        if (!tab || typeof tab.asDocumentTab !== "function") return;
+        const dt = tab.asDocumentTab();
+        if (!dt || typeof dt.getBody !== "function") return;
+        const b = dt.getBody();
+        if (!b) return;
+
+        const txt = getBodyTextSafe(b);
+        const children = b.getNumChildren();
+        let score = (txt ? txt.length : 0) + (children * 50);
+
+        if (txt.includes("{{paciente}}") || txt.includes("{{fecha}}") || txt.includes("{{cedula}}")) {
+          score += 5000;
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
+          best = { tab: tab, body: b };
+        }
+      } catch (e) {}
+    });
+
+    if (!best) return fallbackBody;
+
+    // Eliminamos todas las pestañas sobrantes para que no se exporten hojas extras.
+    try {
+      if (typeof doc.removeTab === "function" && typeof best.tab.getId === "function") {
+        const keepId = best.tab.getId();
+        tabs.forEach(t => {
+          try {
+            if (!t || typeof t.getId !== "function") return;
+            const id = t.getId();
+            if (id && id !== keepId) doc.removeTab(id);
+          } catch (e) {}
+        });
+      }
+    } catch (e) {}
+
+    return best.body || fallbackBody;
+  }
+
+  const configMap = getServiceConfigDetail(data.tipo_examen);
+  const CM_TO_PX = 37.7952755906; // Google Docs trabaja aproximadamente a 96dpi
+  const sizeConfig = {
+    small: { w: Math.round(4.32 * CM_TO_PX), h: Math.round(5.3 * CM_TO_PX), perRow: 3 },
+    medium: { w: Math.round(6.57 * CM_TO_PX), h: Math.round(8.0 * CM_TO_PX), perRow: 2 },
+    // Compactamos un poco mas el bloque "large" para que dos fotos seguidas entren mejor.
+    large: { w: Math.round(8.7 * CM_TO_PX), h: Math.round(9.1 * CM_TO_PX), perRow: 1 }
+  };
+  
+  // 1. OBTENER DATOS REALES (CÉDULA Y EDAD)
+  let cedulaReal = data.id_paciente; 
+  let edadReal = "NN";
+  const pacienteInfo = findRow("pacientes", "id_paciente", data.id_paciente);
+  if (pacienteInfo) {
+      cedulaReal = pacienteInfo.cedula || pacienteInfo.id_paciente; 
+      if (pacienteInfo.fecha_nacimiento) edadReal = calculateAgeExact(pacienteInfo.fecha_nacimiento);
+  }
+
+  // 2. PREPARAR DOC
+  // Volvemos a usar plantilla para conservar membrete/imagenes/firma visual.
+  // Luego dejamos solo la pestaña con contenido real para evitar hoja basura.
+  const reportDocName = "REPORTE_" + data.nombre_paciente;
+  const docId = DriveApp.getFileById(TEMPLATE_ID).makeCopy(reportDocName).getId();
+  const doc = DocumentApp.openById(docId);
+  cleanupDocTabs(doc, reportDocName);
+  const body = getBestTemplateBody(doc);
+
+  // Limpieza de variables viejas
+  body.replaceText("{{titulo}}", ""); body.replaceText("{{paciente}}", "");
+  body.replaceText("{{fecha}}", ""); body.replaceText("{{edad}}", ""); body.replaceText("{{medicamentos}}", "");
+
+  // 3. Limpiar saltos de página heredados de la plantilla para evitar hoja extra
+  for (let i = body.getNumChildren() - 1; i >= 0; i--) {
+    const child = body.getChild(i);
+    if (child.getType() === DocumentApp.ElementType.PAGE_BREAK) {
+      body.removeChild(child);
+    }
+  }
+
+  // 3.1 Limpiar solo artefactos de "Pestaña 1 / Tab 1" o título automático inicial
+  const normalizedDocName = normalizeTextSafe(reportDocName);
+  cleanupTextArtifactsInSection(body, normalizedDocName);
+  try { cleanupTextArtifactsInSection(doc.getHeader(), normalizedDocName); } catch (e) {}
+  try { cleanupTextArtifactsInSection(doc.getFooter(), normalizedDocName); } catch (e) {}
+  for (let i = body.getNumChildren() - 1; i >= 0; i--) {
+    const child = body.getChild(i);
+    const txt = getElementTextSafe(child);
+    if (!txt) continue;
+    const isTabArtifact =
+      /^pestana\s*\d+$/i.test(txt) ||
+      /^tab\s*\d+$/i.test(txt) ||
+      /^pestana\s*sin\s*titulo$/i.test(txt) ||
+      /^untitled\s*tab$/i.test(txt) ||
+      /^document\s*tab\s*\d+$/i.test(txt);
+    const isAutoTitle = txt === normalizedDocName;
+    if (isTabArtifact || isAutoTitle) body.removeChild(child);
+  }
+
+  // 4. CABECERA DE DATOS (TABLA INVISIBLE)
+  const headerTable = body.insertTable(0);
+  headerTable.setBorderWidth(0); 
+  
+  const r1 = headerTable.appendTableRow();
+  r1.appendTableCell(`PACIENTE: ${data.nombre_paciente}`).getChild(0).asParagraph().setBold(true).setFontSize(10);
+  r1.appendTableCell(`EDAD: ${edadReal}`).getChild(0).asParagraph().setBold(true).setFontSize(10).setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+  
+  const r2 = headerTable.appendTableRow();
+  r2.appendTableCell(`C.I: ${cedulaReal}`).getChild(0).asParagraph().setBold(true).setFontSize(10);
+  r2.appendTableCell(`FECHA: ${new Date().toLocaleDateString()}`).getChild(0).asParagraph().setBold(true).setFontSize(10).setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+
+  headerTable.setColumnWidth(0, 350); headerTable.setColumnWidth(1, 150);
+  body.insertParagraph(1, ""); 
+
+  // 5. TÍTULO REAL DEL REPORTE
+  const tituloReal = getRealReportTitle(data.tipo_examen) || data.tipo_examen;
+  const pTitulo = body.insertParagraph(2, tituloReal.toUpperCase());
+  pTitulo.setHeading(DocumentApp.ParagraphHeading.HEADING1).setAlignment(DocumentApp.HorizontalAlignment.CENTER).setForegroundColor("#36235d").setBold(true);
+  pTitulo.setSpacingAfter(6);
+
+  // 6. CONTENIDO DINÁMICO
+  let compactTable = null; 
+  let compactRow = null;
+  let colCounter = 0;
+  let imagenesImpresas = false; // BANDERA DE CONTROL
+
+  // Helper interno para imprimir bloque de fotos respetando tamaño y orden real
+  const imprimirFotos = (tituloSeccion) => {
+      if (data.imagenes && data.imagenes.length > 0) {
+          body.appendParagraph(tituloSeccion)
+            .setHeading(DocumentApp.ParagraphHeading.HEADING3)
+            .setForegroundColor("#36235d")
+            .setSpacingBefore(5)
+            .setSpacingAfter(2);
+
+          const orderedImgs = data.imagenes.slice(); // Respeta orden del usuario
+          let i = 0;
+          while (i < orderedImgs.length) {
+            const current = orderedImgs[i];
+            const currentSize = sizeConfig[current.size] ? current.size : "small";
+            const cfg = sizeConfig[currentSize];
+
+            const rowTable = body.appendTable();
+            rowTable.setBorderWidth(0);
+            const row = rowTable.appendTableRow();
+
+            let used = 0;
+            while (i < orderedImgs.length && used < cfg.perRow) {
+              const imgInfo = orderedImgs[i];
+              const infoSize = sizeConfig[imgInfo.size] ? imgInfo.size : "small";
+              // Si cambia de tamaño, cerramos fila para mantener orden visual correcto
+              if (infoSize !== currentSize) break;
+
+              const blob = imgsMap[imgInfo.index];
+              const cell = row.appendTableCell();
+              cell.setPaddingTop(1).setPaddingBottom(2).setPaddingLeft(1).setPaddingRight(1);
+              cell.appendParagraph(imgInfo.title || `Foto ${imgInfo.index}`)
+                .setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+                .setFontSize(7)
+                .setBold(true)
+                .setSpacingAfter(1);
+
+              if (blob) {
+                try {
+                  const img = cell.appendImage(blob);
+                  const w = img.getWidth();
+                  const h = img.getHeight();
+                  // Llenar marco sin deformar (permitimos ampliar para evitar "grande" pequeño)
+                  const scale = Math.min(cfg.w / w, cfg.h / h);
+                  img.setWidth(Math.round(w * scale)).setHeight(Math.round(h * scale));
+                  img.getParent().setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+                } catch(e) {}
+              }
+              used++;
+              i++;
+            }
+            body.appendParagraph("").setSpacingAfter(currentSize === "large" ? 0 : 1);
+          }
+          imagenesImpresas = true;
+      }
+  };
+
+  // --- RECORRIDO DE CAMPOS ---
+  configMap.forEach(campo => {
+    const key = campo.nombre;
+    const label = campo.etiqueta;
+    const type = campo.tipo;
+    const valor = data.datos_json[key];
+
+    if (!valor && type !== 'titulo' && type !== 'imagenes') return;
+
+    // Romper tabla compacta si viene bloque grande
+    if (type === 'titulo' || type === 'parrafo' || type === 'imagenes') {
+        compactTable = null; compactRow = null; colCounter = 0;
+    }
+
+    // A. IMÁGENES (Si están configuradas en el orden)
+    if (type === 'imagenes') {
+        imprimirFotos(label.toUpperCase());
+    } 
+    // B. TÍTULOS
+    else if (type === 'titulo') {
+         body.appendParagraph(label.toUpperCase()).setHeading(DocumentApp.ParagraphHeading.HEADING3).setForegroundColor("#36235d").setSpacingBefore(12);
+    }
+    // C. PÁRRAFOS (Corregido: NO NEGRITA EN CONTENIDO)
+    else if (type === 'parrafo') {
+         // Título
+         body.appendParagraph(label.toUpperCase() + ":").setBold(true).setForegroundColor("#36235d").setFontSize(10).setSpacingBefore(3);
+         // Contenido (FORZAMOS setBold(false))
+         body.appendParagraph(valor).setBold(false).setFontSize(10).setForegroundColor("#000000").setAlignment(DocumentApp.HorizontalAlignment.JUSTIFY).setSpacingAfter(5);
+    }
+    // D. DATOS CORTOS (Tabla 2 columnas)
+    else {
+         if (!compactTable) {
+             compactTable = body.appendTable();
+             compactTable.setBorderWidth(0);
+             compactRow = compactTable.appendTableRow();
+             colCounter = 0;
+         }
+         if (colCounter >= 2) {
+             compactRow = compactTable.appendTableRow();
+             colCounter = 0;
+         }
+
+         const cell = compactRow.appendTableCell();
+         // Estilo comprimido
+         const p = cell.appendParagraph(label + ": " + valor);
+          p.setSpacingAfter(0);
+         
+         const text = p.editAsText();
+         // Negrita solo a la etiqueta
+         text.setBold(0, label.length, true);
+         text.setForegroundColor(0, label.length, "#36235d"); 
+         // Normal al valor (FORZADO)
+         text.setBold(label.length + 1, text.getText().length - 1, false);
+         text.setForegroundColor(label.length + 1, text.getText().length - 1, "#000000"); 
+
+         colCounter++;
+    }
+  });
+
+  // 7. SALVAVIDAS: SI LAS FOTOS NO SE IMPRIMIERON ARRIBA, IMPRIMIRLAS AL FINAL
+  if (!imagenesImpresas && data.imagenes && data.imagenes.length > 0) {
+      body.appendParagraph(""); // Espacio
+      imprimirFotos("EVIDENCIA FOTOGRÁFICA");
+  }
+
+  appendDoctorVirtualSignature_(body, data);
+
+  doc.saveAndClose();
+  const pdfBlob = DriveApp.getFileById(docId).getAs("application/pdf");
+  const pdfFile = folder.createFile(pdfBlob);
+  applyFileSharingPolicy_(pdfFile);
+  DriveApp.getFileById(docId).setTrashed(true);
+  return pdfFile.getUrl();
+}
+
+// ==========================================
+// GENERADOR DE RECETA "ESTILO VIDAFEM PRO" (CORREGIDO)
+// ==========================================
+
+function createRecetaDocFixed(data, folder) {
+  // 1. Preparar el Documento
+  const docId = DriveApp.getFileById(TEMPLATE_ID).makeCopy("RECETA_" + data.nombre_paciente).getId();
+  const doc = DocumentApp.openById(docId);
+  const body = doc.getBody();
+
+  // 2. LIMPIEZA INICIAL
+  body.replaceText("{{titulo}}", "");
+  body.replaceText("{{paciente}}", "");
+  body.replaceText("{{fecha}}", "");
+  body.replaceText("{{edad}}", "");
+  body.replaceText("{{medicamentos}}", "");
+
+  // ==================================================
+  // BLOQUE 0: OBTENCIÓN DE DATOS REALES (CÉDULA Y EDAD)
+  // ==================================================
+  let cedulaReal = data.id_paciente; // Valor por defecto
+  let edadReal = "NN";
+
+  // Buscamos al paciente en la base de datos para obtener los datos frescos
+  const pacienteInfo = findRow("pacientes", "id_paciente", data.id_paciente);
+  
+  if (pacienteInfo) {
+      // Prioridad a la cédula, si no tiene, usa el ID
+      cedulaReal = pacienteInfo.cedula || pacienteInfo.id_paciente;
+      
+      // Calculamos la edad exacta si hay fecha de nacimiento
+      if (pacienteInfo.fecha_nacimiento) {
+          edadReal = calculateAgeExact(pacienteInfo.fecha_nacimiento);
+      }
+  }
+
+  // ==================================================
+  // BLOQUE 1: CABECERA DEL PACIENTE (TABLA INVISIBLE)
+  // ==================================================
+  const headerTable = body.insertTable(0);
+  headerTable.setBorderWidth(0); // Invisible
+  
+  // Fila 1: Nombre y Edad (Real)
+  const row1 = headerTable.appendTableRow();
+  const c1 = row1.appendTableCell(`PACIENTE: ${data.nombre_paciente}`);
+  const c2 = row1.appendTableCell(`EDAD: ${edadReal}`); 
+  
+  // Fila 2: ID (Cédula Real) y Fecha
+  const row2 = headerTable.appendTableRow();
+  const c3 = row2.appendTableCell(`C.I.: ${cedulaReal}`); 
+  const c4 = row2.appendTableCell(`FECHA: ${new Date().toLocaleDateString()}`);
+
+  // Estilos de texto de la cabecera
+  [c1, c2, c3, c4].forEach(cell => {
+      cell.setPaddingTop(2).setPaddingBottom(2);
+      const p = cell.getChild(0).asParagraph();
+      p.setBold(true).setFontSize(10).setForegroundColor("#333333");
+  });
+  
+  // Ajustar anchos para alineación perfecta
+  headerTable.setColumnWidth(0, 350);
+  headerTable.setColumnWidth(1, 150);
+  
+  // Espacio separador
+  body.insertParagraph(1, ""); 
+
+  // ==================================================
+  // BLOQUE 2: TÍTULO DE LA RECETA
+  // ==================================================
+  const pTitulo = body.insertParagraph(2, "RECETA MÉDICA");
+  pTitulo.setHeading(DocumentApp.ParagraphHeading.HEADING1);
+  pTitulo.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+  pTitulo.setForegroundColor("#36235d"); // Morado Vidafem
+  pTitulo.setBold(true);
+  pTitulo.setSpacingAfter(20);
+
+  // ==================================================
+  // BLOQUE 3: TABLA DE MEDICAMENTOS
+  // ==================================================
+  const table = body.appendTable();
+  const header = table.appendTableRow();
+  
+  // Encabezados con estilo
+  const h1 = header.appendTableCell("MEDICAMENTO");
+  const h2 = header.appendTableCell("CANT");
+  const h3 = header.appendTableCell("INDICACIONES");
+  
+  [h1, h2, h3].forEach(c => {
+      c.setBackgroundColor("#eeeeee")
+       .setPaddingTop(5)
+       .setPaddingBottom(5);
+      c.getChild(0).asParagraph().setBold(true).setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+  });
+
+  // TUS ANCHOS FIJOS (Para que no se aplaste)
+  table.setColumnWidth(0, 200); // Medicamento
+  table.setColumnWidth(1, 50);  // Cantidad
+  table.setColumnWidth(2, 200); // Indicaciones
+
+  // Llenado de datos
+  data.medicamentos.forEach(m => {
+      const row = table.appendTableRow();
+      row.appendTableCell(m.nombre || "").setPaddingTop(5);
+      
+      const cellQty = row.appendTableCell(m.cantidad.toString());
+      cellQty.getChild(0).asParagraph().setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+      cellQty.setVerticalAlignment(DocumentApp.VerticalAlignment.MIDDLE);
+      
+      row.appendTableCell(m.frecuencia || "").setPaddingTop(5);
+  });
+
+  // ==================================================
+  // BLOQUE 4: OBSERVACIONES
+  // ==================================================
+  if (data.observaciones_receta) {
+      const pObs = body.appendParagraph("\nObservaciones: " + data.observaciones_receta);
+      pObs.setItalic(true).setForegroundColor("#555555");
+  }
+
+  appendDoctorVirtualSignature_(body, data);
+
+  // Guardar y Finalizar
+  doc.saveAndClose();
+  const pdfBlob = DriveApp.getFileById(docId).getAs("application/pdf");
+  const pdfFile = folder.createFile(pdfBlob);
+  applyFileSharingPolicy_(pdfFile);
+  
+  DriveApp.getFileById(docId).setTrashed(true);
+  return pdfFile.getUrl();
+}
+
+// ==========================================
+// HELPERS COMPLEMENTARIOS (COMPLETOS)
+// ==========================================
+
+function getServiceConfigDetail(nombreServicio) {
+  const sheet = getConnection().getSheetByName("config_campos");
+  if(!sheet) return [];
+  const raw = sheet.getDataRange().getValues();
+  const campos = [];
+  for (let i = 1; i < raw.length; i++) {
+    if (raw[i][0] === nombreServicio) {
+      campos.push({ nombre: raw[i][1], etiqueta: raw[i][2], tipo: raw[i][3] });
+    }
+  }
+  return campos;
+}
+
+function getRealReportTitle(nombreServicio) {
+  // CORRECCIÓN: Buscamos en la hoja maestra "servicios"
+  const sheet = getConnection().getSheetByName("servicios");
+  if(!sheet) return nombreServicio;
+  
+  const raw = sheet.getDataRange().getValues();
+  for (let i = 1; i < raw.length; i++) {
+    // Columna A[0]=ID, B[1]=NombreServicio, C[2]=Recomendaciones, D[3]=TITULO_REPORTE
+    if (String(raw[i][1]).trim() === String(nombreServicio).trim()) {
+        // Retornamos el Título (Col 3) o el Nombre (Col 1) si está vacío
+        return raw[i][3] ? raw[i][3] : raw[i][1]; 
+    }
+  }
+  return nombreServicio;
+}
+
+// Helper nuevo para la cabecera del PDF
+function calculateAgeForPdf(patientId) {
+    try {
+        const sheet = getConnection().getSheetByName("pacientes");
+        const data = sheet.getDataRange().getValues();
+        for(let i=1; i<data.length; i++) {
+            if(String(data[i][0]) === String(patientId)) {
+                const nac = new Date(data[i][3]); // Col D
+                const hoy = new Date();
+                let edad = hoy.getFullYear() - nac.getFullYear();
+                const m = hoy.getMonth() - nac.getMonth();
+                if (m < 0 || (m === 0 && hoy.getDate() < nac.getDate())) edad--;
+                return edad + " años";
+            }
+        }
+    } catch(e) { return ""; }
+    return "";
+}
+
+function getConnection() {
+  return SpreadsheetApp.openById(SPREADSHEET_ID);
+}
+
+// ==========================================
+// HELPERS (PARA QUE NO DE ERROR DE VARIABLE)
+// ==========================================
+function getServiceConfigDetail(nombreServicio) {
+  // Asegúrate de que esta hoja 'config_campos' exista y tenga datos
+  const sheet = getConnection().getSheetByName("config_campos");
+  if(!sheet) return [];
+  const raw = sheet.getDataRange().getValues();
+  const campos = [];
+  for (let i = 1; i < raw.length; i++) {
+    if (raw[i][0] === nombreServicio) {
+      campos.push({ nombre: raw[i][1], etiqueta: raw[i][2], tipo: raw[i][3] });
+    }
+  }
+  return campos;
+}
+
+
+// Helper gestión carpetas (extraído para limpieza)
+function getReportFolder(dataObj, isUpdate, oldJsonData, idReporte) {
+    try {
+        const root = DriveApp.getFoldersByName(DRIVE_ROOT_FOLDER);
+        const rootFolder = root.hasNext() ? root.next() : DriveApp.createFolder(DRIVE_ROOT_FOLDER);
+        
+        let pFolder;
+        const searchId = String(dataObj.id_paciente);
+        const subs = rootFolder.getFolders();
+        while(subs.hasNext()){
+            const f = subs.next();
+            if(f.getName().endsWith(searchId)) { pFolder = f; break; }
+        }
+        if(!pFolder) pFolder = rootFolder.createFolder(`${dataObj.nombre_paciente}_${dataObj.id_paciente}`);
+
+        if(isUpdate && oldJsonData.report_folder_id) {
+            try { return DriveApp.getFolderById(oldJsonData.report_folder_id); } catch(e){}
+        }
+        const cleanType = (dataObj.tipo_examen || "GENERAL").replace(/[^a-zA-Z0-9]/g, "");
+        return pFolder.createFolder(`${cleanType}_${idReporte}`);
+    } catch(e) {
+        return DriveApp.getRootFolder();
+    }
+}
+
+function defaultDiagnosisExternalPdfLabel_(value, fallbackIndex) {
+    const raw = String(value || "").trim();
+    if (raw) {
+        return raw.replace(/\.pdf$/i, "").trim() || raw;
+    }
+    return "Adjunto PDF " + String(Number(fallbackIndex || 0) + 1);
+}
+
+function normalizeDiagnosisExternalPdfItems_(items) {
+    const list = Array.isArray(items) ? items : [];
+    const out = [];
+    for (let i = 0; i < list.length; i++) {
+        const item = list[i] || {};
+        const url = String(item.url || item.pdf_externo_link || "").trim();
+        const fileId = String(item.file_id || item.fileId || extractDiagnosisAssetFileIdFromUrl_(url) || "").trim();
+        const name = String(item.name || "").trim();
+        const label = defaultDiagnosisExternalPdfLabel_(item.label || item.nombre_visible || item.display_name || name, i);
+        const id = String(item.id || fileId || ("external_pdf_" + (i + 1))).trim();
+        if (!url && !fileId && !name) continue;
+        out.push({
+            id: id,
+            label: label,
+            url: url,
+            file_id: fileId,
+            name: name
+        });
+    }
+    return out;
+}
+
+function getLegacyDiagnosisExternalPdfItems_(payload) {
+    const data = payload || {};
+    const legacyUrl = String(data.pdf_externo_link || "").trim();
+    if (!legacyUrl) return [];
+    const fileId = extractDiagnosisAssetFileIdFromUrl_(legacyUrl);
+    return [{
+        id: String(fileId || "external_pdf_1").trim(),
+        label: defaultDiagnosisExternalPdfLabel_(data.pdf_externo_nombre || data.titulo_adjunto || "Adjunto PDF", 0),
+        url: legacyUrl,
+        file_id: fileId,
+        name: ""
+    }];
+}
+
+function getDiagnosisExternalPdfItems_(payload) {
+    const data = payload || {};
+    const modern = normalizeDiagnosisExternalPdfItems_(data.pdf_externos);
+    return modern.length ? modern : getLegacyDiagnosisExternalPdfItems_(data);
+}
+
+function findDiagnosisExternalPdfItemMatch_(items, probe) {
+    const list = Array.isArray(items) ? items : [];
+    const src = probe || {};
+    const targetId = String(src.id || "").trim();
+    const targetFileId = String(src.file_id || src.fileId || "").trim();
+    const targetUrl = String(src.url || src.pdf_externo_link || "").trim();
+    for (let i = 0; i < list.length; i++) {
+        const item = list[i] || {};
+        if (targetId && String(item.id || "").trim() === targetId) return item;
+        if (targetFileId && String(item.file_id || item.fileId || "").trim() === targetFileId) return item;
+        if (targetUrl && String(item.url || "").trim() === targetUrl) return item;
+    }
+    return null;
+}
+
+function trashDiagnosisExternalPdfItemSafe_(item) {
+    const entry = item || {};
+    const fileId = String(entry.file_id || entry.fileId || extractDiagnosisAssetFileIdFromUrl_(entry.url) || "").trim();
+    if (!fileId) return;
+    try { DriveApp.getFileById(fileId).setTrashed(true); } catch (e) {}
+}
+
+// Helper PDF externo
+function handleExternalPdf(dataObj, isUpdate, oldJsonData, folder) {
+    const oldItems = getDiagnosisExternalPdfItems_(oldJsonData);
+    const requestedItems = Array.isArray(dataObj.pdf_externos) ? dataObj.pdf_externos : null;
+
+    if (dataObj.pdf_externo && dataObj.pdf_externo.delete) {
+        oldItems.forEach(trashDiagnosisExternalPdfItemSafe_);
+        return [];
+    }
+
+    if (requestedItems) {
+        const finalItems = [];
+        requestedItems.forEach(function(item, index) {
+            const current = item || {};
+            if (current.delete === true) return;
+
+            const existing = findDiagnosisExternalPdfItemMatch_(oldItems, current);
+            const label = defaultDiagnosisExternalPdfLabel_(
+                current.label || current.nombre_visible || current.display_name || current.name || (existing && existing.label),
+                index
+            );
+
+            if (current.data) {
+                try {
+                    const raw = String(current.data || "");
+                    const marker = raw.indexOf(",");
+                    const b64 = marker > -1 ? raw.substring(marker + 1) : raw;
+                    const mime = String(current.mime || "application/pdf").trim() || "application/pdf";
+                    const name = String(current.name || (label + ".pdf") || ("adjunto_" + (index + 1) + ".pdf")).trim();
+                    const blob = Utilities.newBlob(Utilities.base64Decode(b64), mime, name);
+                    const file = folder.createFile(blob);
+                    applyFileSharingPolicy_(file);
+                    finalItems.push({
+                        id: String(current.id || Utilities.getUuid()).trim(),
+                        label: label,
+                        url: file.getUrl(),
+                        file_id: file.getId(),
+                        name: name
+                    });
+                } catch (e) {}
+                return;
+            }
+
+            const keptUrl = String(current.url || current.pdf_externo_link || (existing && existing.url) || "").trim();
+            const keptFileId = String(current.file_id || current.fileId || (existing && existing.file_id) || extractDiagnosisAssetFileIdFromUrl_(keptUrl) || "").trim();
+            if (!keptUrl) return;
+            finalItems.push({
+                id: String(current.id || (existing && existing.id) || keptFileId || Utilities.getUuid()).trim(),
+                label: label,
+                url: keptUrl,
+                file_id: keptFileId,
+                name: String(current.name || (existing && existing.name) || "").trim()
+            });
+        });
+
+        oldItems.forEach(function(oldItem) {
+            if (findDiagnosisExternalPdfItemMatch_(finalItems, oldItem)) return;
+            trashDiagnosisExternalPdfItemSafe_(oldItem);
+        });
+        return finalItems;
+    }
+
+    if (dataObj.pdf_externo && dataObj.pdf_externo.data) {
+        oldItems.forEach(trashDiagnosisExternalPdfItemSafe_);
+        try {
+            const blob = Utilities.newBlob(
+                Utilities.base64Decode(String(dataObj.pdf_externo.data || "").split(",")[1]),
+                dataObj.pdf_externo.mime,
+                dataObj.pdf_externo.name
+            );
+            const f = folder.createFile(blob);
+            applyFileSharingPolicy_(f);
+            return [{
+                id: String(Utilities.getUuid()).trim(),
+                label: defaultDiagnosisExternalPdfLabel_(dataObj.pdf_externo.label || dataObj.pdf_externo.name || "Adjunto PDF", 0),
+                url: f.getUrl(),
+                file_id: f.getId(),
+                name: String(dataObj.pdf_externo.name || "").trim()
+            }];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    if (isUpdate) return oldItems;
+    return [];
+}
+
+function diagnosisHasMeaningfulReportContent_(dataObj) {
+    const data = dataObj || {};
+    const fixedKeys = [
+        "motivo",
+        "evaluacion",
+        "vagina",
+        "vulva",
+        "ano",
+        "hallazgos",
+        "diagnostico",
+        "biopsia",
+        "recomendaciones"
+    ];
+    for (let i = 0; i < fixedKeys.length; i++) {
+        if (String(data[fixedKeys[i]] || "").trim()) return true;
+    }
+
+    const dyn = data.datos_json;
+    if (dyn && typeof dyn === "object") {
+        for (const key in dyn) {
+            if (!Object.prototype.hasOwnProperty.call(dyn, key)) continue;
+            if (String(dyn[key] === undefined || dyn[key] === null ? "" : dyn[key]).trim()) return true;
+        }
+    }
+
+    return !!(data.imagenes && Array.isArray(data.imagenes) && data.imagenes.length);
+}
+
+function mergeDiagnosisPayloadForSave_(oldJsonData, dataObj, examType) {
+    const oldData = oldJsonData || {};
+    const incoming = dataObj || {};
+    const mode = String(examType || incoming.tipo_examen || oldData.tipo_examen || "").trim().toUpperCase();
+    const preserveBundle = mode === "RECETA" || mode === "EXAMENPDF" || mode === "TODO";
+    const merged = { ...oldData, ...incoming };
+
+    if (preserveBundle) {
+        if (!Object.prototype.hasOwnProperty.call(incoming, "datos_json") && oldData.datos_json) {
+            merged.datos_json = oldData.datos_json;
+        }
+        if (!Object.prototype.hasOwnProperty.call(incoming, "imagenes") && oldData.imagenes) {
+            merged.imagenes = oldData.imagenes;
+        }
+        const incomingMeds = incoming.medicamentos && Array.isArray(incoming.medicamentos) ? incoming.medicamentos : [];
+        if (!incomingMeds.length && oldData.medicamentos && Array.isArray(oldData.medicamentos)) {
+            merged.medicamentos = oldData.medicamentos;
+        }
+        if (!String(incoming.observaciones_receta || "").trim() && String(oldData.observaciones_receta || "").trim()) {
+            merged.observaciones_receta = oldData.observaciones_receta;
+        }
+    }
+
+    merged.pdf_externos = Object.prototype.hasOwnProperty.call(incoming, "pdf_externos")
+        ? normalizeDiagnosisExternalPdfItems_(incoming.pdf_externos)
+        : getDiagnosisExternalPdfItems_(oldData);
+    merged.pdf_externo_link = merged.pdf_externos.length
+        ? String(merged.pdf_externos[0].url || "").trim()
+        : "";
+
+    return merged;
+}
+
+function extractDiagnosisAssetFileIdFromUrl_(url) {
+    const raw = String(url || "").trim();
+    if (!raw) return "";
+
+    let match = raw.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    if (match && match[1]) return match[1];
+
+    match = raw.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    if (match && match[1]) return match[1];
+
+    match = raw.match(/[-\w]{25,}/);
+    return match && match[0] ? match[0] : "";
+}
+
+function trashDiagnosisAssetFileByUrl_(url) {
+    const fileId = extractDiagnosisAssetFileIdFromUrl_(url);
+    if (!fileId) return { success: false, message: "No se pudo identificar el archivo." };
+    try {
+        DriveApp.getFileById(fileId).setTrashed(true);
+        return { success: true, fileId: fileId };
+    } catch (e) {
+        return { success: false, fileId: fileId, message: e.toString() };
+    }
+}
+
+function deleteDiagnosisAsset(idReporte, assetType, assetId) {
+    const reportId = String(idReporte || "").trim();
+    const asset = String(assetType || "").trim().toLowerCase();
+    const targetAssetId = String(assetId || "").trim();
+    if (!reportId) return { success: false, message: "Falta id_reporte." };
+
+    const allowed = {
+        report_pdf: { label: "informe", field: "pdf_url" },
+        recipe_pdf: { label: "receta", field: "pdf_receta_link" },
+        external_pdf: { label: "adjunto", field: "pdf_externo_link" }
+    };
+    const meta = allowed[asset];
+    if (!meta) return { success: false, message: "Tipo de documento no valido." };
+
+    const sheet = getSheet("diagnosticos_archivos");
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return { success: false, message: "No hay diagnosticos registrados." };
+
+    const headers = data[0];
+    const idxId = headers.indexOf("id_reporte");
+    const idxPatient = headers.indexOf("id_paciente");
+    const idxType = headers.indexOf("tipo_examen");
+    const idxDate = headers.indexOf("fecha");
+    const idxJson = headers.indexOf("datos_json");
+    const idxPdf = headers.indexOf("pdf_url");
+    const idxCreatedBy = headers.indexOf("creado_por");
+    if (idxId === -1) return { success: false, message: "Estructura de diagnosticos incompleta." };
+
+    let rowIndex = -1;
+    let row = null;
+    for (let i = 1; i < data.length; i++) {
+        if (String(data[i][idxId] || "").trim() === reportId) {
+            rowIndex = i + 1;
+            row = data[i];
+            break;
+        }
+    }
+    if (rowIndex === -1 || !row) return { success: false, message: "Reporte no encontrado." };
+
+    let jsonData = {};
+    try { jsonData = JSON.parse(String(idxJson > -1 ? row[idxJson] : "") || "{}"); } catch (e) { jsonData = {}; }
+
+    let targetUrl = "";
+    let updatedPdfUrl = String(idxPdf > -1 ? row[idxPdf] || "" : "").trim();
+    let externalItems = getDiagnosisExternalPdfItems_(jsonData);
+
+    if (asset === "report_pdf") {
+        targetUrl = updatedPdfUrl;
+        updatedPdfUrl = "";
+        if (idxPdf > -1) sheet.getRange(rowIndex, idxPdf + 1).setValue("");
+    } else if (asset === "recipe_pdf") {
+        targetUrl = String(jsonData.pdf_receta_link || "").trim();
+        delete jsonData.pdf_receta_link;
+    } else if (asset === "external_pdf") {
+        if (!externalItems.length) {
+            targetUrl = String(jsonData.pdf_externo_link || "").trim();
+            externalItems = targetUrl ? getLegacyDiagnosisExternalPdfItems_(jsonData) : [];
+        }
+        if (!externalItems.length) {
+            return { success: false, message: "Ese documento ya no existe o no fue generado." };
+        }
+
+        let targetIndex = 0;
+        if (targetAssetId) {
+            for (let i = 0; i < externalItems.length; i++) {
+                const current = externalItems[i] || {};
+                if (
+                    String(current.id || "").trim() === targetAssetId ||
+                    String(current.file_id || current.fileId || "").trim() === targetAssetId ||
+                    String(current.url || "").trim() === targetAssetId
+                ) {
+                    targetIndex = i;
+                    break;
+                }
+            }
+        }
+        const removed = externalItems.splice(targetIndex, 1)[0] || {};
+        targetUrl = String(removed.url || "").trim();
+        jsonData.pdf_externos = externalItems;
+        jsonData.pdf_externo_link = externalItems.length ? String(externalItems[0].url || "").trim() : "";
+    }
+
+    if (!targetUrl) {
+        return { success: false, message: "Ese documento ya no existe o no fue generado." };
+    }
+
+    let warningMessage = "";
+    const deleteRes = trashDiagnosisAssetFileByUrl_(targetUrl);
+    if (!deleteRes.success) {
+        warningMessage = deleteRes.message || "No se pudo enviar el archivo a la papelera de Drive.";
+    }
+
+    if (asset !== "report_pdf" && idxJson > -1) {
+        sheet.getRange(rowIndex, idxJson + 1).setValue(JSON.stringify(jsonData));
+    } else if (idxJson > -1) {
+        sheet.getRange(rowIndex, idxJson + 1).setValue(JSON.stringify(jsonData));
+    }
+
+    const syncRow = {
+        id_reporte: reportId,
+        id_paciente: idxPatient > -1 ? row[idxPatient] : "",
+        tipo_examen: idxType > -1 ? row[idxType] : "",
+        fecha: idxDate > -1 ? row[idxDate] : "",
+        datos_json: JSON.stringify(jsonData),
+        pdf_url: updatedPdfUrl,
+        creado_por: idxCreatedBy > -1 ? row[idxCreatedBy] : ""
+    };
+    const syncRes = syncDiagnosisToSupabase_(syncRow);
+    if (syncRes && !syncRes.success && !syncRes.skipped) {
+        warningMessage = warningMessage
+            ? (warningMessage + " | " + String(syncRes.message || "No se pudo sincronizar con Supabase."))
+            : String(syncRes.message || "No se pudo sincronizar con Supabase.");
+    }
+
+    return warningMessage
+        ? {
+            success: true,
+            message: "Documento eliminado con advertencia.",
+            warning: warningMessage,
+            remaining_docs: {
+                pdf_url: updatedPdfUrl,
+                pdf_receta_link: String(jsonData.pdf_receta_link || "").trim(),
+                pdf_externo_link: String(jsonData.pdf_externo_link || "").trim(),
+                pdf_externos: normalizeDiagnosisExternalPdfItems_(jsonData.pdf_externos)
+            }
+        }
+        : {
+            success: true,
+            message: "Se elimino el " + meta.label + " correctamente.",
+            remaining_docs: {
+                pdf_url: updatedPdfUrl,
+                pdf_receta_link: String(jsonData.pdf_receta_link || "").trim(),
+                pdf_externo_link: String(jsonData.pdf_externo_link || "").trim(),
+                pdf_externos: normalizeDiagnosisExternalPdfItems_(jsonData.pdf_externos)
+            }
+        };
+}
+
+// Helper Excel
+function saveToExcel(sheet, rowIndex, isUpdate, idReporte, dataObj, fileIds, folderId, pdfUrl, pdfReceta, pdfExternos, fechaOverride) {
+    const clean = { ...dataObj };
+    clean.drive_file_ids = fileIds;
+    clean.report_folder_id = folderId;
+    clean.pdf_receta_link = pdfReceta;
+    clean.pdf_externos = normalizeDiagnosisExternalPdfItems_(pdfExternos);
+    clean.pdf_externo_link = clean.pdf_externos.length ? String(clean.pdf_externos[0].url || "").trim() : "";
+    delete clean.pdf_externo;
+    if(clean.imagenes) clean.imagenes = clean.imagenes.map(img => ({ index: img.index, title: img.title||"", fileId: img.fileId, isNew: false }));
+    
+    const json = JSON.stringify(clean);
+    const fecha = fechaOverride || new Date();
+
+    if(isUpdate && rowIndex > 0) {
+      sheet.getRange(rowIndex, 3).setValue(dataObj.tipo_examen);
+      sheet.getRange(rowIndex, 4).setValue(fecha);
+      sheet.getRange(rowIndex, 5).setValue(json);
+      sheet.getRange(rowIndex, 6).setValue(pdfUrl);
+    } else {
+      sheet.appendRow([idReporte, dataObj.id_paciente, dataObj.tipo_examen, fecha, json, pdfUrl, "DOCTOR"]);
+    }
+}
+
+function getOrCreateSheet(name, h) {
+  const ss = getConnection();
+  let s = ss.getSheetByName(name);
+  if(!s) { s = ss.insertSheet(name); if(h) s.appendRow(h); }
+  return s;
+}
+
+function getConnection() {
+  return SpreadsheetApp.openById(SPREADSHEET_ID);
+}
+
+// Helper obligatorio (si no lo tienes ya en el archivo)
+function getOrCreateSheet(name, headers) {
+  const ss = getConnection();
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    if (headers && headers.length > 0) {
+      sheet.appendRow(headers);
+    }
+  }
+  return sheet;
+}
+
+// --- GENERADOR PDF (TU VERSIÓN CORRECTA USANDO GOOGLE DOCS) ---
+
+// ======================================================
+// 2. REEMPLAZA ESTA FUNCIÓN EN Database.gs
+// ======================================================
+
+function createPdfFromTemplate(data, imgs, folder) {
+  // TUS IDs DE PLANTILLA
+  const TEMPLATE_ID = "1Y12yV26PskBfkEu2Kt0ksKutQmiTbzbPfdoaODZn-uQ"; 
+  const SIGNATURE_ID = "1eR6B-HWTblsaQ3Mff5r6EzJFC-QC_xat"; 
+
+  // Copia temporal
+  const templateFile = DriveApp.getFileById(TEMPLATE_ID);
+  const tempDocFile = templateFile.makeCopy(`REPORTE_${data.nombre_paciente}`, folder);
+  const doc = DocumentApp.openById(tempDocFile.getId());
+  const body = doc.getBody();
+  
+  // ¡IMPORTANTE! NO HACEMOS body.clear() PARA RESPETAR TU DISEÑO
+
+  // 1. REEMPLAZO DE VARIABLES (Encabezado)
+  const fechaHoy = new Date().toLocaleDateString("es-ES");
+  body.replaceText("{{PACIENTE}}", data.nombre_paciente || " ");
+  body.replaceText("{{FECHA}}", fechaHoy);
+  body.replaceText("{{CEDULA}}", data.id_paciente || " ");
+  
+  // 2. AGREGAR CONTENIDO AL FINAL (Después del membrete)
+  const styleTitulo = {};
+  styleTitulo[DocumentApp.Attribute.BOLD] = true;
+  styleTitulo[DocumentApp.Attribute.FOREGROUND_COLOR] = "#36235d";
+  styleTitulo[DocumentApp.Attribute.FONT_SIZE] = 11;
+
+  const styleTexto = {};
+  styleTexto[DocumentApp.Attribute.BOLD] = false;
+  styleTexto[DocumentApp.Attribute.FOREGROUND_COLOR] = "#000000";
+  styleTexto[DocumentApp.Attribute.FONT_SIZE] = 10;
+
+  body.appendParagraph("\n"); // Espacio
+
+  // Título del Examen
+  body.appendParagraph((data.tipo_examen || "REPORTE").toUpperCase())
+      .setHeading(DocumentApp.ParagraphHeading.HEADING2)
+      .setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+      .setAttributes(styleTitulo);
+
+  // COLPOSCOPIA
+  if (data.tipo_examen === "COLPOSCOPIA") {
+      writeField(body, "EVALUACIÓN GENERAL:", data.evaluacion, styleTitulo, styleTexto);
+      
+      if(data.vagina || data.vulva || data.ano) {
+          body.appendParagraph(`Zonas: Vagina: ${data.vagina||'-'} | Vulva: ${data.vulva||'-'} | Ano: ${data.ano||'-'}`)
+              .setAttributes(styleTexto);
+      }
+      
+      writeField(body, "HALLAZGOS:", data.hallazgos, styleTitulo, styleTexto);
+      writeField(body, "DIAGNÓSTICO:", data.diagnostico, styleTitulo, styleTexto);
+      writeField(body, "BIOPSIA:", data.biopsia, styleTitulo, styleTexto);
+      writeField(body, "RECOMENDACIONES:", data.recomendaciones, styleTitulo, styleTexto);
+  } 
+  // GENERAL / OTROS
+  else {
+      writeField(body, "MOTIVO:", data.motivo, styleTitulo, styleTexto);
+      writeField(body, "EVOLUCIÓN:", data.evaluacion, styleTitulo, styleTexto);
+      
+      if(data.datos_json) {
+         for (const [key, value] of Object.entries(data.datos_json)) {
+             if(value && key !== "tipo_examen") {
+                 writeField(body, key.toUpperCase() + ":", value, styleTitulo, styleTexto);
+             }
+         }
+      }
+      writeField(body, "DIAGNÓSTICO:", data.diagnostico, styleTitulo, styleTexto);
+      writeField(body, "TRATAMIENTO:", data.recomendaciones, styleTitulo, styleTexto);
+  }
+
+  // 3. FOTOS
+  if(data.imagenes && imgs) {
+      // Filtramos solo las que tienen blob válido
+      const validImgs = data.imagenes.filter(img => imgs[img.index]);
+      
+      if(validImgs.length > 0) {
+          body.appendParagraph("\nEVIDENCIA FOTOGRÁFICA").setAttributes(styleTitulo).setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+          const table = body.appendTable();
+          table.setBorderWidth(0);
+          let row = table.appendTableRow();
+          let count = 0;
+
+          validImgs.forEach(imgInfo => {
+              if(count > 0 && count % 2 === 0) row = table.appendTableRow();
+              const cell = row.appendTableCell();
+              
+              cell.appendParagraph(imgInfo.title || "Foto")
+                  .setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+                  .editAsText().setFontSize(9).setBold(true);
+
+              try {
+                  const image = cell.appendImage(imgs[imgInfo.index]);
+                  image.setWidth(220).setHeight(160);
+                  image.getParent().setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+              } catch(e) { cell.appendParagraph("(Error img)"); }
+              count++;
+          });
+      }
+  }
+
+  // 4. FIRMA
+  try {
+      body.appendParagraph("\n\n");
+      const firmaBlob = DriveApp.getFileById(SIGNATURE_ID).getBlob();
+      const p = body.appendParagraph("");
+      p.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+      p.appendImage(firmaBlob).setWidth(150).setHeight(80);
+      body.appendParagraph("_________________________\nFirma del Profesional")
+          .setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+          .editAsText().setFontSize(9);
+  } catch(e) {}
+
+  doc.saveAndClose();
+  
+  // 5. CONVERTIR Y DAR PERMISOS PÚBLICOS
+  const pdfBlob = tempDocFile.getAs(MimeType.PDF);
+  const pdfFile = folder.createFile(pdfBlob);
+  applyFileSharingPolicy_(pdfFile); // Politica centralizada
+  
+  tempDocFile.setTrashed(true);
+  return pdfFile.getUrl();
+}
+
+function writeField(body, title, text, styleT, styleC) {
+    if(text && text.trim() !== "") {
+        body.appendParagraph("\n" + title).setAttributes(styleT);
+        body.appendParagraph(text).setAttributes(styleC);
+    }
+}
+
+// Helper para escribir limpio
+function agregarCampo(body, titulo, contenido, estiloT, estiloC) {
+    if(contenido && contenido.trim() !== "") {
+        body.appendParagraph("\n" + titulo).setAttributes(estiloT);
+        body.appendParagraph(contenido).setAttributes(estiloC);
+    }
+}
+// ==========================================
+// 11. ELIMINAR REPORTE Y ARCHIVOS (INCLUYENDO FOTOS)
+// ==========================================
+
+function deleteDiagnosisAndFiles(idReporte) {
+  try {
+    const sheet = getSheet("diagnosticos_archivos");
+    const data = sheet.getDataRange().getValues();
+    let rowIndex = -1;
+    let pdfUrl = "";
+    let jsonData = {}; 
+
+    // 1. Buscar la fila, el URL del PDF y los DATOS JSON
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(idReporte)) { // Columna 0 es ID
+        rowIndex = i + 1; // Fila en Excel (base 1)
+        pdfUrl = data[i][5]; // Columna 5 es pdf_url
+        
+        // --- AQUÍ LEEMOS LOS DATOS GUARDADOS PARA BUSCAR LOS IDs DE LAS FOTOS ---
+        try {
+            jsonData = JSON.parse(data[i][4]); 
+        } catch(e) {
+            jsonData = {};
+        }
+        break;
+      }
+    }
+
+    if (rowIndex === -1) {
+      return { success: false, message: "Reporte no encontrado." };
+    }
+
+    // 2. Eliminar el archivo PDF de Drive (Si existe link)
+    if (pdfUrl && pdfUrl.includes("id=")) {
+      try {
+        const fileId = pdfUrl.match(/id=([a-zA-Z0-9_-]+)/)[1];
+        if(fileId) {
+          DriveApp.getFileById(fileId).setTrashed(true);
+        }
+      } catch (e) {
+        console.log("Advertencia: No se pudo borrar el archivo de Drive o ya no existe. " + e);
+      }
+    }
+
+    // 3. NUEVO: Eliminar las fotos individuales usando los IDs guardados
+    if (jsonData.drive_file_ids && Array.isArray(jsonData.drive_file_ids)) {
+        jsonData.drive_file_ids.forEach(fileId => {
+            try {
+                DriveApp.getFileById(fileId).setTrashed(true);
+            } catch(e) {
+                console.log("No se pudo borrar foto individual: " + fileId);
+            }
+        });
+    }
+
+    // 4. Eliminar la fila del Excel
+    sheet.deleteRow(rowIndex);
+
+    return { success: true, message: "Registro y todos los archivos eliminados correctamente." };
+
+  } catch (error) {
+    return { success: false, message: "Error al eliminar: " + error.toString() };
+  }
+}
+// Helper para borrar MÚLTIPLES filas que coincidan con un ID (Citas, Reportes, etc.)
+function deleteRowsBulk(sheetName, colHeader, val) {
+   try {
+     const sheet = getSheet(sheetName);
+     const data = sheet.getDataRange().getValues();
+     if (data.length <= 1) return;
+
+     // Buscar índice de la columna (ej: "id_paciente")
+     const colIdx = data[0].indexOf(colHeader);
+     if(colIdx === -1) return;
+
+     // Recorrer de ABAJO hacia ARRIBA (Vital para no dañar índices al borrar)
+     for(let i = data.length - 1; i >= 1; i--) {
+         if(String(data[i][colIdx]) === String(val)) {
+             if (sheetName === "diagnosticos_archivos") {
+                 try { deleteDiagnosisFromSupabase_(data[i][0]); } catch (eSync) {}
+             }
+             sheet.deleteRow(i + 1); // +1 porque sheet es base 1
+         }
+     }
+   } catch(e) {
+       console.log("Error limpiando tabla " + sheetName + ": " + e);
+   }
+}
+// ==========================================
+// GENERADOR DE RECETA HORIZONTAL (Google Slides)
+// ==========================================
+
+// HELPER PARA CALCULAR EDAD EXACTA
+function calculateAgeExact(birthDate) {
+  if (!birthDate) return "NN";
+  const birth = new Date(birthDate);
+  const today = new Date();
+  
+  let age = today.getFullYear() - birth.getFullYear();
+  const m = today.getMonth() - birth.getMonth();
+  
+  // Si no ha cumplido años este mes, o es el mismo mes pero no ha llegado el día
+  if (m < 0 || (m === 0 && today.getDate() < birth.getDate())) {
+    age--;
+  }
+  
+  return age + " años";
+}
+
+function createRecetaDoc(data, folder) {
+  // TU PLANTILLA DE RECETA (HORIZONTAL) ES UN GOOGLE DOC
+  const TEMPLATE_ID = "1FGbmhfPn-_wRN0lSV99a6yQhw2h4Jl6M9Mz8cTv_Qas"; 
+  
+  let edad = "--";
+  try {
+      const p = findRow("pacientes", "id_paciente", data.id_paciente);
+      if (p && p.fecha_nacimiento) edad = calculateAge(p.fecha_nacimiento);
+  } catch(e) {}
+
+  // Preparar Textos
+  let textoMedicamentos = "";
+  let textoIndicaciones = "";
+
+  if (data.medicamentos && data.medicamentos.length > 0) {
+      data.medicamentos.forEach((m, i) => {
+          textoMedicamentos += `${i+1}. ${m.nombre} (Cant: ${m.cantidad})\n`;
+          textoIndicaciones += `${i+1}. ${m.frecuencia}\n\n`;
+      });
+  } else {
+      textoMedicamentos = "Sin medicamentos.";
+  }
+
+  if (data.observaciones_receta) { // Ojo: a veces viene como 'observaciones' o 'observaciones_receta'
+      textoIndicaciones += `\nNOTA: ${data.observaciones_receta}`;
+  }
+
+  // 1. Copia Temporal
+  const copiaFile = DriveApp.getFileById(TEMPLATE_ID).makeCopy(`RECETA_${data.nombre_paciente}`, folder);
+  
+  // 2. ABRIR COMO DOCUMENTO (NO COMO SLIDE)
+  const doc = DocumentApp.openById(copiaFile.getId());
+  const body = doc.getBody();
+
+  // 3. Reemplazar Variables
+  body.replaceText("{{PACIENTE}}", data.nombre_paciente || " ");
+  body.replaceText("{{CEDULA}}", data.id_paciente || " ");
+  body.replaceText("{{EDAD}}", edad);
+  body.replaceText("{{FECHA}}", new Date().toLocaleDateString("es-ES"));
+  
+  body.replaceText("{{MEDICAMENTOS}}", textoMedicamentos);
+  body.replaceText("{{INDICACIONES}}", textoIndicaciones);
+
+  // 4. Guardar y Cerrar
+  doc.saveAndClose(); 
+  
+  // 5. Convertir a PDF
+  const pdfBlob = copiaFile.getAs(MimeType.PDF);
+  const pdfFile = folder.createFile(pdfBlob);
+  
+  // 6. PERMISOS PÚBLICOS
+  applyFileSharingPolicy_(pdfFile);
+  
+  // 7. Borrar temporal
+  copiaFile.setTrashed(true);
+  
+  return pdfFile.getUrl();
+}
+// --- NUEVO: FUNCIÓN PARA LEER LA CONFIGURACIÓN DE CAMPOS DINÁMICOS ---
+// ==========================================
+// CONFIGURACIÓN DINÁMICA DE SERVICIOS (MODULAR)
+// ==========================================
+
+function getServiceConfiguration() {
+  const sheet = getSheet("config_campos");
+  const data = sheet.getDataRange().getValues();
+  
+  // Si solo están los encabezados (fila 1), devolvemos vacío
+  if (data.length <= 1) return {};
+
+  const config = {};
+
+  // Empezamos en fila 1 (la 0 son los títulos: servicio, campo_nombre, campo_etiqueta, tipo)
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    
+    // Obtenemos los valores de las columnas A, B, C, D
+    const servicio = String(row[0]).trim();       // Ej: "Cultivo"
+    const nombreCampo = String(row[1]).trim();    // Ej: "tipo_muestra"
+    const etiquetaCampo = String(row[2]).trim();  // Ej: "Tipo de Muestra:"
+    const tipoCampo = String(row[3]).trim().toLowerCase(); // Ej: "texto", "parrafo", "titulo"
+
+    // Si la fila tiene servicio y nombre de campo, la procesamos
+    if (servicio && nombreCampo) {
+      
+      // Si es la primera vez que vemos este servicio, creamos su lista vacía
+      if (!config[servicio]) {
+        config[servicio] = [];
+      }
+
+      // Agregamos el campo a la lista de ese servicio
+      config[servicio].push({
+        nombre: nombreCampo,
+        etiqueta: etiquetaCampo,
+        tipo: tipoCampo
+      });
+    }
+  }
+
+  // Devolvemos el "Menú" completo al Frontend
+  // Ejemplo: { "Cultivo": [{nombre: "muestra", ...}], "VPH": [{...}] }
+  return config;
+}
+// --- PEGAR EN Database.gs SI NO LAS TIENES ---
+
+// Buscar historial ordenado
+function getHistoryByPatient(idPaciente) {
+  const sheet = getSheet("diagnosticos_archivos");
+  const data = sheet.getDataRange().getValues();
+  const headers = data.shift();
+  
+  const historial = data
+    .map(row => {
+      let obj = {};
+      headers.forEach((h, i) => obj[h] = row[i]);
+      return obj;
+    })
+    .filter(item => String(item.id_paciente) === String(idPaciente))
+    .reverse(); // El más reciente primero
+
+  return { success: true, data: historial };
+}
+
+// Borrar reporte y sus archivos físicos
+function deleteDiagnosisAndFiles(idReporte) {
+  const sheet = getSheet("diagnosticos_archivos");
+  const data = sheet.getDataRange().getValues();
+  let deleted = false;
+  let warningMessage = "";
+  
+  // 1. Borrar Fila del Excel
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(idReporte)) {
+      
+      // Intentar borrar archivos asociados (PDFs, Fotos)
+      try {
+        const jsonData = JSON.parse(data[i][4]); // Columna 'datos_json'
+        
+        // Borrar archivos de Drive (drive_file_ids)
+        if (jsonData.drive_file_ids) {
+           jsonData.drive_file_ids.forEach(fid => {
+             try { DriveApp.getFileById(fid).setTrashed(true); } catch(e){}
+           });
+        }
+        // Borrar Reporte PDF
+        if (data[i][5] && data[i][5].includes("id=")) {
+           try { DriveApp.getFileById(data[i][5].match(/id=([a-zA-Z0-9_-]+)/)[1]).setTrashed(true); } catch(e){}
+        }
+        // Borrar Adjuntos PDF externos
+        const externalItems = getDiagnosisExternalPdfItems_(jsonData);
+        if (externalItems.length) {
+           externalItems.forEach(function(item) {
+             trashDiagnosisExternalPdfItemSafe_(item);
+           });
+        } else if (jsonData.pdf_externo_link && jsonData.pdf_externo_link.includes("id=")) {
+           try { DriveApp.getFileById(jsonData.pdf_externo_link.match(/id=([a-zA-Z0-9_-]+)/)[1]).setTrashed(true); } catch(e){}
+        }
+
+      } catch(e) { console.log("Error borrando archivos físicos: " + e); }
+
+      sheet.deleteRow(i + 1);
+      deleted = true;
+      break;
+    }
+  }
+
+  if (!deleted) return { success: false, message: "Reporte no encontrado" };
+
+  const syncRes = deleteDiagnosisFromSupabase_(idReporte);
+  if (syncRes && !syncRes.success && !syncRes.skipped) {
+    warningMessage = syncRes.message || "No se pudo sincronizar con Supabase.";
+  }
+
+  return warningMessage
+    ? { success: true, warning: warningMessage, message: "Diagnostico eliminado. Advertencia: no se pudo sincronizar con Supabase." }
+    : { success: true };
+}
+// ==========================================
+// GESTIÓN DINÁMICA DE SERVICIOS (ESCRIBIR EN EXCEL)
+// ==========================================
+
+// Agregar un nuevo servicio con sus campos
+// Database.gs - FUNCIÓN CORREGIDA
+
+function saveServiceFull(data, requester) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+
+    if (!data || !data.nombre_servicio) {
+      return { success: false, message: "Falta nombre del servicio" };
+    }
+
+    const req = String(requester || "").trim().toLowerCase();
+    const isSuper = (typeof isSuperadminUser === "function") ? isSuperadminUser(req) : false;
+    const ensured = ensureServicesSheetHeaders_();
+    const sheetServ = ensured.sheet;
+    const headers = ensured.headers;
+    const sheetCampos = ensureServiceConfigSheetHeaders_().sheet;
+
+    const idxId = headers.indexOf("id");
+    const idxName = headers.indexOf("nombre_servicio");
+    const idxRecs = headers.indexOf("recomendaciones");
+    const idxTitle = headers.indexOf("titulo_reporte");
+    const idxScope = headers.indexOf("scope_visibility");
+    const idxOwner = headers.indexOf("owner_usuario");
+    const idxDuration = headers.indexOf("duracion_minutos");
+
+    const isCreate = !String(data.originalName || "").trim();
+    const searchName = String(data.originalName || data.nombre_servicio).trim();
+    const targetName = String(data.nombre_servicio || "").trim();
+    const searchNameLower = searchName.toLowerCase();
+    const targetNameLower = targetName.toLowerCase();
+
+    const dataServ = sheetServ.getDataRange().getValues();
+    let rowIndex = -1;
+    for (let i = 1; i < dataServ.length; i++) {
+      if (String(dataServ[i][idxName] || "").trim().toLowerCase() === searchNameLower) {
+        rowIndex = i + 1;
+        break;
+      }
+    }
+
+    for (let i = 1; i < dataServ.length; i++) {
+      const rowName = String(dataServ[i][idxName] || "").trim().toLowerCase();
+      if (!rowName || rowName !== targetNameLower) continue;
+      if (rowIndex !== -1 && (i + 1) === rowIndex) continue;
+      return { success: false, message: "Ya existe un servicio con ese nombre." };
+    }
+
+    let currentScope = "ALL";
+    let currentOwner = "";
+    let currentDuration = 30;
+    let idServicio = "SERV-" + new Date().getTime();
+
+    if (rowIndex !== -1) {
+      const row = dataServ[rowIndex - 1];
+      idServicio = String(row[idxId] || idServicio);
+      currentScope = String(row[idxScope] || "ALL").toUpperCase();
+      if (currentScope !== "OWNER" && currentScope !== "ALL") currentScope = "ALL";
+      currentOwner = String(row[idxOwner] || "").trim().toLowerCase();
+      currentDuration = idxDuration > -1 ? normalizeDurationMinutes_(row[idxDuration]) : 30;
+
+      // Seguridad: si el servicio no tiene owner, ningun medico puede apropiarselo.
+      // Solo superadmin puede asignar propietario explicitamente.
+      if (!currentOwner && !isSuper) {
+        return { success: false, message: "Servicio sin propietario. Solicita asignacion por superadmin." };
+      }
+      if (!currentOwner && isSuper) {
+        currentOwner = String(data.owner_usuario || req || "").trim().toLowerCase();
+      }
+      if (currentOwner && currentOwner !== req && !isSuper) {
+        return { success: false, message: "Solo el medico creador puede modificar este servicio." };
+      }
+    }
+
+    let finalScope = currentScope;
+    let finalOwner = currentOwner;
+    let finalDuration = currentDuration || 30;
+
+    if (isCreate) {
+      if (!req) return { success: false, message: "No se pudo identificar al usuario creador." };
+      finalScope = String(data.scope_visibility || "ALL").trim().toUpperCase();
+      if (finalScope !== "OWNER" && finalScope !== "ALL") finalScope = "ALL";
+      finalOwner = req;
+      finalDuration = normalizeDurationMinutes_(data.duracion_minutos);
+    } else {
+      // En edicion se permite reconfigurar alcance, pero sin cambiar propietario.
+      const requestedScope = String(data.scope_visibility || "").trim().toUpperCase();
+      if (requestedScope === "OWNER" || requestedScope === "ALL") {
+        finalScope = requestedScope;
+      }
+      if (!finalOwner && req) finalOwner = req;
+      if (hasOwnKey_(data, "duracion_minutos")) {
+        finalDuration = normalizeDurationMinutes_(data.duracion_minutos);
+      }
+    }
+
+    const rowData = new Array(headers.length).fill("");
+    rowData[idxId] = idServicio;
+    rowData[idxName] = targetName;
+    rowData[idxRecs] = data.recomendaciones || "";
+    rowData[idxTitle] = data.titulo_reporte || "";
+    rowData[idxScope] = finalScope;
+    rowData[idxOwner] = finalOwner;
+    if (idxDuration > -1) rowData[idxDuration] = finalDuration;
+
+    if (rowIndex !== -1) {
+      sheetServ.getRange(rowIndex, 1, 1, headers.length).setValues([rowData]);
+    } else {
+      sheetServ.appendRow(rowData);
+    }
+
+    const dataCampos = sheetCampos.getDataRange().getValues();
+    for (let i = dataCampos.length - 1; i >= 1; i--) {
+      const servEnFila = String(dataCampos[i][0] || "").trim();
+      if (servEnFila === searchName || servEnFila === targetName) {
+        sheetCampos.deleteRow(i + 1);
+      }
+    }
+
+    if (data.campos && Array.isArray(data.campos)) {
+      data.campos.forEach(campo => {
+        sheetCampos.appendRow([
+          targetName,
+          campo.nombre,
+          campo.etiqueta,
+          campo.tipo,
+          campo.opciones || ""
+        ]);
+      });
+    }
+
+    const savedService = {
+      id: idServicio,
+      nombre_servicio: targetName,
+      recomendaciones: data.recomendaciones || "",
+      titulo_reporte: data.titulo_reporte || "",
+      scope_visibility: finalScope,
+      owner_usuario: finalOwner,
+      duracion_minutos: finalDuration,
+      duracion_label: durationMinutesToLabel_(finalDuration)
+    };
+
+    const syncRes = syncServiceFullToSupabase_(savedService, data.campos || [], [searchName]);
+    if (syncRes && !syncRes.success && !syncRes.skipped) {
+      return {
+        success: true,
+        message: "Servicio guardado y configurado correctamente. Advertencia: no se pudo sincronizar con Supabase.",
+        warning: syncRes.message || "No se pudo sincronizar con Supabase.",
+        data: savedService
+      };
+    }
+
+    return {
+      success: true,
+      message: "Servicio guardado y configurado correctamente.",
+      data: savedService
+    };
+
+  } catch (e) {
+    return { success: false, message: "Error DB: " + e.toString() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+// --- FUNCIONES AUXILIARES FALTANTES ---
+
+function getOrCreateSheet(name, headers) {
+  const ss = getConnection();
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    if (headers && headers.length > 0) {
+      sheet.appendRow(headers);
+    }
+  }
+  return sheet;
+}
+
+// Función para borrar una cita individual
+function deleteAppointment(id_cita) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(5000);
+    const sheet = getSheet("citas");
+    const rowIndex = findRowIndex(sheet, "id_cita", id_cita);
+    
+    if (rowIndex === -1) {
+      return { success: false, message: "Cita no encontrada" };
+    }
+    
+    // Borrar la fila
+    sheet.deleteRow(rowIndex);
+
+    const response = { success: true, message: "Cita eliminada correctamente" };
+    const syncRes = deleteAppointmentFromSupabase_(id_cita);
+    if (syncRes && !syncRes.success && !syncRes.skipped) {
+      response.warning = syncRes.message || "No se pudo sincronizar con Supabase.";
+      response.message = "Cita eliminada correctamente. Advertencia: no se pudo sincronizar con Supabase.";
+    }
+    return response;
+  } catch (e) {
+    return { success: false, message: "Error al eliminar cita: " + e.toString() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function normalizeBulkIds_(ids) {
+  if (!ids || !Array.isArray(ids)) return [];
+  const map = {};
+  const result = [];
+  ids.forEach(function(id) {
+    const clean = String(id === undefined || id === null ? "" : id).trim();
+    if (!clean || map[clean]) return;
+    map[clean] = true;
+    result.push(clean);
+  });
+  return result;
+}
+
+function deleteAppointmentsBulk(idList) {
+  const ids = normalizeBulkIds_(idList);
+  if (!ids.length) {
+    return { success: false, deleted_count: 0, missing_ids: [], message: "No se recibieron citas para eliminar." };
+  }
+
+  const sheet = getSheet("citas");
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) {
+    return { success: false, deleted_count: 0, missing_ids: ids, message: "No hay citas registradas." };
+  }
+
+  const idxId = data[0].indexOf("id_cita");
+  if (idxId === -1) {
+    return { success: false, deleted_count: 0, missing_ids: ids, message: "La hoja de citas no tiene columna id_cita." };
+  }
+
+  const pending = {};
+  ids.forEach(function(id) { pending[id] = true; });
+
+  let deleted = 0;
+  const deletedIds = [];
+  for (let i = data.length - 1; i >= 1; i--) {
+    const rowId = String(data[i][idxId] || "").trim();
+    if (!pending[rowId]) continue;
+    sheet.deleteRow(i + 1);
+    deleted++;
+    deletedIds.push(rowId);
+    delete pending[rowId];
+  }
+
+  const missing = Object.keys(pending);
+  const response = {
+    success: deleted > 0,
+    deleted_count: deleted,
+    missing_ids: missing,
+    message: deleted > 0
+      ? "Se eliminaron " + deleted + " cita(s)."
+      : "No se encontraron citas para eliminar."
+  };
+  const warnings = [];
+  deletedIds.forEach(function(id) {
+    const syncRes = deleteAppointmentFromSupabase_(id);
+    if (syncRes && !syncRes.success && !syncRes.skipped) {
+      warnings.push(String(syncRes.message || "No se pudo sincronizar con Supabase."));
+    }
+  });
+  if (warnings.length) {
+    response.warning = warnings.join(" | ");
+    response.message = response.success
+      ? ("Se eliminaron " + deleted + " cita(s). Advertencia: no se pudo sincronizar con Supabase.")
+      : "No se encontraron citas para eliminar. Advertencia: no se pudo sincronizar con Supabase.";
+  }
+  return response;
+}
+
+function deleteDiagnosesBulk(idList) {
+  const ids = normalizeBulkIds_(idList);
+  if (!ids.length) {
+    return { success: false, deleted_count: 0, failed_ids: [], message: "No se recibieron diagnosticos para eliminar." };
+  }
+
+  let deleted = 0;
+  const failed = [];
+  const warnings = [];
+
+  ids.forEach(function(id) {
+    try {
+      const res = deleteDiagnosisAndFiles(id);
+      if (res && res.success) {
+        deleted++;
+        if (res.warning) warnings.push(String(res.warning));
+      } else {
+        failed.push(id);
+      }
+    } catch (e) {
+      failed.push(id);
+    }
+  });
+
+  return {
+    success: deleted > 0,
+    deleted_count: deleted,
+    failed_ids: failed,
+    warning: warnings.length ? warnings[0] : "",
+    message: deleted > 0
+      ? "Se eliminaron " + deleted + " diagnostico(s)."
+      : "No se encontraron diagnosticos para eliminar."
+  };
+}
+
+function deletePatientEvolutionEntriesBulk(idList) {
+  const ids = normalizeBulkIds_(idList);
+  if (!ids.length) {
+    return { success: false, deleted_count: 0, missing_ids: [], message: "No se recibieron evoluciones para eliminar." };
+  }
+
+  const ensured = ensurePatientEvolutionSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const idxId = headers.indexOf("id_evolucion");
+  if (idxId === -1) {
+    return { success: false, deleted_count: 0, missing_ids: ids, message: "Estructura de evolucion incompleta." };
+  }
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) {
+    return { success: false, deleted_count: 0, missing_ids: ids, message: "No hay evoluciones registradas." };
+  }
+
+  const pending = {};
+  ids.forEach(function(id) { pending[id] = true; });
+
+  let deleted = 0;
+  for (let i = data.length - 1; i >= 1; i--) {
+    const rowId = String(data[i][idxId] || "").trim();
+    if (!pending[rowId]) continue;
+    sheet.deleteRow(i + 1);
+    deleted++;
+    delete pending[rowId];
+  }
+
+  const missing = Object.keys(pending);
+  const response = {
+    success: deleted > 0,
+    deleted_count: deleted,
+    missing_ids: missing,
+    message: deleted > 0
+      ? "Se eliminaron " + deleted + " evolucion(es)."
+      : "No se encontraron evoluciones para eliminar."
+  };
+  const warnings = [];
+  ids.forEach(function(id) {
+    if (missing.indexOf(id) !== -1) return;
+    const syncRes = deletePatientEvolutionFromSupabase_(id);
+    if (syncRes && !syncRes.success && !syncRes.skipped) {
+      warnings.push(String(syncRes.message || "No se pudo sincronizar con Supabase."));
+    }
+  });
+  if (warnings.length) {
+    response.warning = warnings.join(" | ");
+    response.message = response.success
+      ? ("Se eliminaron " + deleted + " evolucion(es). Advertencia: no se pudo sincronizar con Supabase.")
+      : "No se encontraron evoluciones para eliminar. Advertencia: no se pudo sincronizar con Supabase.";
+  }
+  return response;
+}
+
+// Asegurarnos de que getFolder también exista si se llama por fuera
+function getFolder(name, parentFolder) {
+  const parent = parentFolder || DriveApp.getRootFolder();
+  const folders = parent.getFoldersByName(name);
+  if (folders.hasNext()) {
+    return folders.next();
+  } else {
+    return parent.createFolder(name);
+  }
+}
+
+
+
+// OVERRIDE: deleteServiceFull con control de propietario
+function deleteServiceFull(nombreServicio, requester) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+
+    const serviceName = String(nombreServicio || "").trim();
+    if (!serviceName) return { success: false, message: "Nombre de servicio invalido." };
+
+    const ensured = ensureServicesSheetHeaders_();
+    const sheetServ = ensured.sheet;
+    const headers = ensured.headers;
+    const dataServ = sheetServ.getDataRange().getValues();
+
+    const idxId = headers.indexOf("id");
+    const idxName = headers.indexOf("nombre_servicio");
+    const idxScope = headers.indexOf("scope_visibility");
+    const idxOwner = headers.indexOf("owner_usuario");
+    if (idxName === -1) return { success: false, message: "Estructura de servicios incompleta." };
+
+    let rowIndex = -1;
+    let scope = "ALL";
+    let owner = "";
+    let serviceId = "";
+    for (let i = 1; i < dataServ.length; i++) {
+      if (String(dataServ[i][idxName] || "").trim() === serviceName) {
+        rowIndex = i + 1;
+        serviceId = idxId > -1 ? String(dataServ[i][idxId] || "").trim() : "";
+        scope = idxScope > -1 ? String(dataServ[i][idxScope] || "").trim().toUpperCase() : "ALL";
+        if (scope !== "OWNER" && scope !== "ALL") scope = "ALL";
+        owner = idxOwner > -1 ? String(dataServ[i][idxOwner] || "").trim().toLowerCase() : "";
+        break;
+      }
+    }
+    if (rowIndex === -1) return { success: false, message: "Servicio no encontrado." };
+
+    const access = resolveServiceDoctorRequester_(requester);
+    const requesterDoctor = String(access.doctor || "").trim().toLowerCase();
+    if (!owner && !access.superadmin) {
+      return { success: false, message: "Servicio sin propietario. Solo superadmin puede eliminarlo." };
+    }
+    if (owner && !access.superadmin && (!requesterDoctor || requesterDoctor !== owner)) {
+      return { success: false, message: "Solo el medico creador puede eliminar este servicio." };
+    }
+
+    const sheetCampos = ensureServiceConfigSheetHeaders_().sheet;
+    const dataCampos = sheetCampos.getDataRange().getValues();
+    for (let i = dataCampos.length - 1; i >= 1; i--) {
+      if (String(dataCampos[i][0]).trim() === serviceName) {
+        sheetCampos.deleteRow(i + 1);
+      }
+    }
+
+    sheetServ.deleteRow(rowIndex);
+
+    const syncRes = deleteServiceFromSupabase_(serviceId, serviceName);
+    if (syncRes && !syncRes.success && !syncRes.skipped) {
+      return {
+        success: true,
+        message: "Servicio eliminado completamente. Advertencia: no se pudo sincronizar con Supabase.",
+        warning: syncRes.message || "No se pudo sincronizar con Supabase."
+      };
+    }
+
+    return { success: true, message: "Servicio eliminado completamente." };
+  } catch (e) {
+    return { success: false, message: e.toString() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function ensurePatientEvolutionSheet_() {
+  const ss = getConnection();
+  const sheetName = "evolucion_paciente";
+  const required = [
+    "id_evolucion",
+    "id_paciente",
+    "fecha_consulta",
+    "motivo_consulta",
+    "evolucion",
+    "diagnostico",
+    "tratamiento",
+    "sugerencias",
+    "creado_por",
+    "fecha_actualizacion"
+  ];
+
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    sheet.appendRow(required);
+    return { sheet: sheet, headers: required };
+  }
+
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(required);
+    return { sheet: sheet, headers: required };
+  }
+
+  const lastCol = Math.max(sheet.getLastColumn(), required.length);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  required.forEach(function(name) {
+    if (headers.indexOf(name) !== -1) return;
+    const col = sheet.getLastColumn() + 1;
+    sheet.getRange(1, col).setValue(name);
+    headers.push(name);
+  });
+
+  return { sheet: sheet, headers: headers };
+}
+
+function parsePatientEvolutionDateTime_(value) {
+  if (!value) return null;
+  if (Object.prototype.toString.call(value) === "[object Date]") {
+    return isNaN(value.getTime()) ? null : value;
+  }
+
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    const second = Number(match[6] || 0);
+    const parsed = new Date(year, month - 1, day, hour, minute, second, 0);
+    if (!isNaN(parsed.getTime())) return parsed;
+  }
+
+  const fallback = new Date(raw);
+  return isNaN(fallback.getTime()) ? null : fallback;
+}
+
+function mapPatientEvolutionEntry_(headers, row) {
+  function valueOf(name) {
+    const idx = headers.indexOf(name);
+    return idx > -1 ? row[idx] : "";
+  }
+
+  const id = String(valueOf("id_evolucion") || "").trim();
+  if (!id) return null;
+
+  return {
+    id_evolucion: id,
+    id_paciente: String(valueOf("id_paciente") || "").trim(),
+    fecha_consulta: valueOf("fecha_consulta") || "",
+    motivo_consulta: String(valueOf("motivo_consulta") || "").trim(),
+    evolucion: String(valueOf("evolucion") || "").trim(),
+    diagnostico: String(valueOf("diagnostico") || "").trim(),
+    tratamiento: String(valueOf("tratamiento") || "").trim(),
+    sugerencias: String(valueOf("sugerencias") || "").trim(),
+    creado_por: String(valueOf("creado_por") || "").trim(),
+    fecha_actualizacion: valueOf("fecha_actualizacion") || ""
+  };
+}
+
+function getPatientEvolutionEntries(patientId) {
+  const ensured = ensurePatientEvolutionSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+
+  const list = [];
+  for (let i = 1; i < data.length; i++) {
+    const mapped = mapPatientEvolutionEntry_(headers, data[i]);
+    if (!mapped) continue;
+    if (String(mapped.id_paciente) !== String(patientId)) continue;
+    list.push(mapped);
+  }
+
+  return list.sort(function(a, b) {
+    const aTime = new Date(a.fecha_consulta || a.fecha_actualizacion || 0).getTime() || 0;
+    const bTime = new Date(b.fecha_consulta || b.fecha_actualizacion || 0).getTime() || 0;
+    return bTime - aTime;
+  });
+}
+
+function savePatientEvolutionEntry(dataObj, requester) {
+  const data = dataObj || {};
+  const patientId = String(data.id_paciente || "").trim();
+  const requesterDoctor = String(requester || "").trim().toLowerCase();
+  if (!patientId || !requesterDoctor) {
+    return { success: false, message: "Faltan datos para guardar la evolucion." };
+  }
+
+  const ensured = ensurePatientEvolutionSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const values = sheet.getDataRange().getValues();
+
+  const idxId = headers.indexOf("id_evolucion");
+  const idxPatient = headers.indexOf("id_paciente");
+  const idxDate = headers.indexOf("fecha_consulta");
+  const idxReason = headers.indexOf("motivo_consulta");
+  const idxProgress = headers.indexOf("evolucion");
+  const idxDiagnosis = headers.indexOf("diagnostico");
+  const idxTreatment = headers.indexOf("tratamiento");
+  const idxSuggestions = headers.indexOf("sugerencias");
+  const idxOwner = headers.indexOf("creado_por");
+  const idxUpdated = headers.indexOf("fecha_actualizacion");
+
+  const targetId = String(data.id_evolucion || "").trim();
+  let rowIndex = -1;
+  let createdAt = parsePatientEvolutionDateTime_(data.fecha_consulta) || new Date();
+  let createdBy = requesterDoctor;
+  let storedPatientId = patientId;
+
+  if (targetId) {
+    for (let i = 1; i < values.length; i++) {
+      if (String(values[i][idxId] || "").trim() === targetId) {
+        rowIndex = i + 1;
+        storedPatientId = String(values[i][idxPatient] || patientId).trim() || patientId;
+        createdAt = parsePatientEvolutionDateTime_(data.fecha_consulta) || values[i][idxDate] || new Date();
+        createdBy = String(values[i][idxOwner] || requesterDoctor).trim().toLowerCase();
+        break;
+      }
+    }
+    if (rowIndex === -1) {
+      return { success: false, message: "La evolucion que intentas editar no existe." };
+    }
+  }
+
+  const idEvolution = targetId || ("EVOL-" + new Date().getTime());
+  const row = new Array(headers.length).fill("");
+  row[idxId] = idEvolution;
+  row[idxPatient] = storedPatientId;
+  row[idxDate] = createdAt;
+  row[idxReason] = data.motivo_consulta || "";
+  row[idxProgress] = data.evolucion || "";
+  row[idxDiagnosis] = data.diagnostico || "";
+  row[idxTreatment] = data.tratamiento || "";
+  row[idxSuggestions] = data.sugerencias || "";
+  row[idxOwner] = createdBy || requesterDoctor;
+  row[idxUpdated] = new Date();
+
+  if (rowIndex > 0) {
+    sheet.getRange(rowIndex, 1, 1, headers.length).setValues([row]);
+  } else {
+    sheet.appendRow(row);
+  }
+
+  const response = {
+    success: true,
+    message: "Evolucion guardada correctamente.",
+    data: mapPatientEvolutionEntry_(headers, row)
+  };
+  const syncRes = syncPatientEvolutionToSupabase_(response.data || {});
+  if (syncRes && !syncRes.success && !syncRes.skipped) {
+    response.warning = syncRes.message || "No se pudo sincronizar con Supabase.";
+    response.message = "Evolucion guardada correctamente. Advertencia: no se pudo sincronizar con Supabase.";
+  }
+  return response;
+}
+
+function deletePatientEvolutionEntry(idEvolucion) {
+  const ensured = ensurePatientEvolutionSheet_();
+  const sheet = ensured.sheet;
+  const headers = ensured.headers;
+  const idxId = headers.indexOf("id_evolucion");
+  if (idxId === -1) {
+    return { success: false, message: "Estructura de evolucion incompleta." };
+  }
+
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idxId] || "").trim() === String(idEvolucion || "").trim()) {
+      sheet.deleteRow(i + 1);
+      const response = { success: true, message: "Evolucion eliminada correctamente." };
+      const syncRes = deletePatientEvolutionFromSupabase_(idEvolucion);
+      if (syncRes && !syncRes.success && !syncRes.skipped) {
+        response.warning = syncRes.message || "No se pudo sincronizar con Supabase.";
+        response.message = "Evolucion eliminada correctamente. Advertencia: no se pudo sincronizar con Supabase.";
+      }
+      return response;
+    }
+  }
+
+  return { success: false, message: "Evolucion no encontrada." };
+}

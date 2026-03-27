@@ -1,0 +1,19 @@
+﻿FASE 1 - INSTRUMENTACION DE TIEMPOS API
+Fecha: 2026-03-05 16:05:55
+
+Archivo modificado:
+- backend/API.gs.txt
+
+Cambio aplicado:
+1) Se agrega medicion de tiempo por request en doPost.
+2) Se agrega helper logApiTiming_(action, startMs, response).
+   - Siempre loguea login: rol y tiempo total en ms.
+   - Loguea acciones lentas (>1200 ms) para detectar cuellos de botella.
+
+Formato de log:
+- [API_TIMING] action=login role=admin elapsed_ms=...
+- [API_TIMING] action=<accion> elapsed_ms=... (si fue lenta)
+
+Objetivo:
+- Medir en produccion real donde sigue la latencia alta.
+- Tomar decisiones de optimizacion con datos, no suposiciones.
